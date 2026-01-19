@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenJBOD - HTTP Settings</title>
+    <link rel="stylesheet" href="/style.css">
+    <script src="http.js"></script>
+</head>
+<body>
+    <div class="container">
+        <nav class="menu">
+            <ul>
+                <p class="menu-heading">OpenJBOD</p>
+                <li><a href="/">Overview</a></li>
+                <li><a href="/about">About</a></li>
+                <p class="menu-heading">Settings</p>
+                <li><a href="/network">Network</a></li>
+                <li><a href="/power">Power</a></li>
+                <li><a href="/http" class="active">HTTP</a></li>
+                <li><a href="/environment">Environment</a></li>
+                <li><a href="/users">Users</a></li>
+                <li><a href="/reset">Reset</a></li>
+            </ul>
+        </nav>
+        <main class="content">
+            <p class="heading">Settings - HTTP Server</p>
+            <div class="row">
+                <div class="grid-2">
+                    <form id="http-form">
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>HTTP Server</b>
+                            </div>
+                            <div class="form-input">
+                                <label for="enable_http">
+                                    <input type="checkbox" id="enable_http" name="enable_http" checked /> Enable HTTP Server
+                                </label>
+                            </div>
+                        </div>
+                        
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>HTTP Port</b>
+                            </div>
+                            <div class="form-input">
+                                <input type="number" id="http_port" name="http_port" placeholder="80" value="80" min="1" max="65535" />
+                            </div>
+                        </div>
+                        
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>HTTPS Server</b>
+                            </div>
+                            <div class="form-input">
+                                <label for="enable_https">
+                                    <input type="checkbox" id="enable_https" name="enable_https" checked /> Enable HTTPS Server
+                                </label>
+                            </div>
+                        </div>
+                        
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>HTTPS Port</b>
+                            </div>
+                            <div class="form-input">
+                                <input type="number" id="https_port" name="https_port" placeholder="443" value="443" min="1" max="65535" />
+                            </div>
+                        </div>
+                        
+                        <hr />
+                        
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>Custom Certificates</b>
+                            </div>
+                            <div class="form-input">
+                                <label for="use_custom_certificates">
+                                    <input type="checkbox" id="use_custom_certificates" name="use_custom_certificates" /> Use Custom Certificates
+                                </label>
+                            </div>
+                        </div>
+                        
+                        <hr />
+                        <button type="submit">Save HTTP Settings</button>
+                    </form>
+                    
+                    <br />
+                    
+                    <form id="cert-form">
+                        <p class="heading">Certificate Management</p>
+                        
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>Server Certificate</b>
+                            </div>
+                            <div class="form-input">
+                                <input type="file" id="server_cert" name="server_cert" accept=".pem,.crt,.der" />
+                                <small>Upload server certificate (.pem, .crt, .der)</small>
+                            </div>
+                        </div>
+                        
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>Private Key</b>
+                            </div>
+                            <div class="form-input">
+                                <input type="file" id="private_key" name="private_key" accept=".pem,.key,.der" />
+                                <small>Upload private key (.pem, .key, .der)</small>
+                            </div>
+                        </div>
+                        
+                        <button type="button" id="upload_certs">Upload Certificates</button>
+                    </form>
+                </div>
+                <div class="grid-2">
+                    <p class="heading">Legend</p>
+                    <fieldset>
+                        <p><b>HTTP Server</b> - Enable or disable the HTTP web interface on port 80 (or custom port). This provides unencrypted access to the device.</p>
+                        <p><b>HTTP Port</b> - Port number for the HTTP server. Default is 80.</p>
+                        <p><b>HTTPS Server</b> - Enable or disable the HTTPS (encrypted) web interface on port 8443 (or custom port). This provides encrypted access to the device.</p>
+                        <p><b>HTTPS Port</b> - Port number for the HTTPS server. Default is 443.</p>
+                        <p><b>Custom Certificates</b> - Use uploaded certificates instead of the default self-signed certificate. When enabled, the server will use uploaded certificates for HTTPS connections.</p>
+                        <p><b>Certificate Management</b> - Upload new certificates that can be used with the HTTPS server. Certificates are stored separately from the setting to use them.</p>
+                    </fieldset>
+                </div>
+            </div>
+        </main>
+    </div>
+</body>
+</html>

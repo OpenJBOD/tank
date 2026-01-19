@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenJBOD</title>
+    <link rel="stylesheet" href="/style.css">
+    <script src="main.js"></script>
+</head>
+<body>
+    <div class="container">
+        <nav class="menu">
+            <ul>
+                <p class="menu-heading">OpenJBOD</p>
+                <li><a href="/">Overview</a></li>
+                <li><a href="/about">About</a></li>
+                <p class="menu-heading">Settings</p>
+                <li><a href="/network">Network</a></li>
+                <li><a href="/power">Power</a></li>
+                <li><a href="/http">HTTP</a></li>
+                <li><a href="/environment">Environment</a></li>
+                <li><a href="/users">Users</a></li>
+                <li><a href="/reset">Reset</a></li>
+            </ul>
+        </nav>
+        <main class="content">
+            <p class="heading">Overview</p>
+            <div class="row">
+                <div class="grid-3">
+                    <p class="heading">Power Supply</p>
+                    <p><b>State:</b> <span id="power_status" class="status-unknown">Unknown</span></p>
+                    <input id="power_on" type="button" value="Power ON">
+                    <input id="power_off" type="button" value="Power OFF">
+                </div>
+                <div class="grid-3">
+                    <p class="heading">Environment Info</p>
+                    <table>
+                        <tr>
+                            <th>Fan RPM:</th>
+                            <td id="fan_rpm">Loading...</td>
+                        </tr>
+                        <tr>
+                            <th>Fan Speed</th>
+                            <td id="fan_speed">Loading...</td>
+                        </tr>
+                        <tr>
+                            <th>Temperature (C)</th>
+                            <td id="temperature">Loading...</td>
+                        </tr>
+                    </table>
+                </div>
+                <div class="grid-3">
+                    <p class="heading">Board Info</p>
+                    <table>
+                        <tr>
+                            <th>Board Revision</th>
+                            <td id="board_rev">Loading...</td>
+                        </tr>
+                        <tr>
+                            <th>Serial Number</th>
+                            <td id="serial_number">Loading...</td>
+                        </tr>
+                        <tr>
+                            <th>Software Version</th>
+                            <td id="software_version">Loading...</td>
+                        </tr>
+                        <tr>
+                            <th>MAC Address</th>
+                            <td id="mac_address">Loading...</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+            <div class="row">
+                <div class="grid-3">
+                    <p class="heading">Network Info</p>
+                    <table>
+                        <tr>
+                            <th>Hostname</th>
+                            <td id="hostname">Loading...</td>
+                        </tr>
+                        <tr>
+                            <th>IP Config Method</th>
+                            <td id="ip_method">Loading...</td>
+                        </tr>
+                        <tr>
+                            <th>IP Address</th>
+                            <td id="ip_address">Loading...</td>
+                        </tr>
+                        <tr>
+                            <th>Subnet Mask</th>
+                            <td id="subnet_mask">Loading...</td>
+                        </tr>
+                        <tr>
+                            <th>Gateway</th>
+                            <td id="gateway">Loading...</td>
+                        </tr>
+                        <tr>
+                            <th>IPv6 Mode</th>
+                            <td id="ipv6_mode_status">Loading...</td>
+                        </tr>
+                        <tr>
+                            <th>IPv6 Addresses</th>
+                            <td id="ipv6_addresses">Loading...</td>
+                        </tr>
+                    </table>
+                </div>
+                <div class="grid-3">
+                    <p class="heading">Power Settings</p>
+                    <table>
+                        <tr>
+                            <th>Power on at boot</th>
+                            <td id="on_boot_enabled_display">Loading...</td>
+                        </tr>
+                        <tr>
+                            <th>Boot delay</th>
+                            <td id="on_boot_delay_display">Loading...</td>
+                        </tr>
+                        <tr>
+                            <th>Follow USB power</th>
+                            <td id="follow_usb_enabled_display">Loading...</td>
+                        </tr>
+                        <tr>
+                            <th>USB follow delay</th>
+                            <td id="follow_usb_delay_display">Loading...</td>
+                        </tr>
+                    </table>
+                </div>
+                <div class="grid-3">
+                    <p class="heading">Debug Info</p>
+                    <table>
+                        <tr>
+                            <th>Uptime</th>
+                            <td id="uptime">Loading...</td>
+                        </tr>
+                        <tr>
+                            <th>LED Control</th>
+                            <td>
+                                <input id="led_on" type="button" value="LED on">
+                                <input id="led_off" type="button" value="LED off">
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+        </main>
+    </div>
+</body>
+</html>
+<!-- Build test Fri 22 Aug 15:07:40 CEST 2025 -->

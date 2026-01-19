@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenJBOD - Reset</title>
+    <link rel="stylesheet" href="/style.css">
+    <script src="/reset.js"></script>
+</head>
+<body>
+    <div class="container">
+        <nav class="menu">
+            <ul>
+                <p class="menu-heading">OpenJBOD</p>
+                <li><a href="/">Overview</a></li>
+                <li><a href="/about">About</a></li>
+                <p class="menu-heading">Settings</p>
+                <li><a href="/network">Network</a></li>
+                <li><a href="/power">Power</a></li>
+                <li><a href="/http">HTTP</a></li>
+                <li><a href="/environment">Environment</a></li>
+                <li><a href="/users">Users</a></li>
+                <li><a href="/reset" class="active">Reset</a></li>
+            </ul>
+        </nav>
+        <main class="content">
+            <p class="heading">Settings - Reset</p>
+            <div class="row">
+                <div class="grid-2">
+                    <p class="heading">Device Reboot</p>
+                    <p>Immediately restarts the RP2040 controller without touching stored configuration.</p>
+                    <button id="reset-device">Restart Device</button>
+                </div>
+                <div class="grid-2">
+                    <p class="heading">Factory Reset</p>
+                    <p>Erases all persisted settings, restores defaults, and then restarts the controller.</p>
+                    <button id="reset-config">Reset Configuration &amp; Reboot</button>
+                </div>
+            </div>
+            <p id="reset-status"></p>
+        </main>
+    </div>
+</body>
+</html>

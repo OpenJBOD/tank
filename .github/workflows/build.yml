@@ -1,0 +1,73 @@
+name: Build
+
+on:
+  push:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build app and tests
+    strategy:
+      fail-fast: false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          path: tank
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.12
+
+      - name: Setup cmake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.22.x'
+
+      - name: Cache Zephyr modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            bootloader
+            modules
+            tools
+            zephyr
+          key: zephyr-modules-${{ hashFiles('tank/west.yml') }}
+          restore-keys: |
+            zephyr-modules-
+
+      - name: Setup Zephyr project
+        uses: zephyrproject-rtos/action-zephyr-setup@v1
+        with:
+          app-path: tank
+          toolchains: arm-zephyr-eabi
+          ccache-cache-key: ubuntu-latest
+
+      - name: Build firmware
+        working-directory: tank
+        shell: bash
+        run: west build -s . -b rpi_pico
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zephyr
+          path: tank/build/zephyr/zephyr.uf2
+
+      - name: Upload release asset
+        if: github.event_name == 'release'
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: tank/build/zephyr/zephyr.uf2
+          asset_name: tank-${{ github.event.release.tag_name }}.uf2
+          asset_content_type: application/octet-stream

@@ -1,0 +1,347 @@
+html, body {
+  margin: 0;
+  padding: 0;
+  font-family: Arial, sans-serif;
+  line-height: 1.6;
+  color: #333;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  margin: 0;
+  font-weight: normal;
+}
+
+p {
+  margin: 0 0 1em;
+}
+
+a {
+  color: #007BFF;
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+.container {
+  display: flex;
+  flex-direction: row;
+  min-height: 100vh;
+}
+
+.content {
+  flex: 1;
+  padding: 20px;
+  margin-left: 170px;
+}
+
+/* Grid styles */
+.grid-1 {
+  width: 100%;
+}
+
+.grid-2 {
+  width: 50%;
+}
+
+.grid-3 {
+  width: 33.33%;
+}
+
+.grid-4 {
+  width: 25%;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .grid-2, .grid-3 {
+      width: 100%;
+  }
+  .content {
+      margin-left: 10px;
+  }
+}
+
+/* Row styles */
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  margin: 0 -0.5em;
+}
+
+.row > * {
+  padding: 0 0.5em;
+  box-sizing: border-box;
+}
+
+/* Heading styles */
+.heading {
+  color: #5a5a5a;
+  font-weight: bold;
+  margin-bottom: 0.5em;
+  margin-top: 0.5em;
+  position: relative;
+}
+
+.heading::after {
+  content: '';
+  display: block;
+  width: 100%;
+  height: 1px;
+  background-color: #ddd;
+  margin-top: 0.5em;
+}
+
+/* Table styles */
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+table th, table td {
+  width: 50%;
+  text-align: left;
+  padding: 4px 2px;
+}
+
+textarea {
+  font-family: Arial, sans-serif;
+  padding: 10px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  box-sizing: border-box;
+  width: 100%;
+}
+
+/* Menu styles */
+nav.menu ul {
+  list-style-type: none;
+  padding: 0;
+}
+
+.menu {
+  width: 140px;
+  background-color: #282828;
+  padding: 15px;
+  box-shadow: 2px 0 5px rgba(0, 0, 0, 0.1);
+  position: fixed;
+  height: 100%;
+  overflow-y: auto;
+  transition: width 0.3s;
+  top: 0;
+  left: 0;
+}
+
+.menu a {
+  display: block;
+  padding: 10px;
+  color: white;
+  text-decoration: none;
+  border-radius: 4px;
+  transition: background-color 0.3s, color 0.3s;
+}
+
+.menu a:hover {
+  background-color: #007bff;
+  color: white;
+}
+
+/* Menu heading styles */
+.menu-heading {
+  background-color: #007bff;
+  color: white;
+  padding: 10px;
+  margin-top: 10px;
+  text-align: center;
+  font-weight: bold;
+  position: relative;
+}
+
+.menu-heading:first-child {
+  margin-top: 0;
+}
+
+/* Button styles */
+button, input[type="button"] {
+  background-color: #007bff;
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  margin: 2px;
+}
+
+button:hover, input[type="button"]:hover {
+  background-color: #0056b3;
+}
+
+/* Form styles */
+input[type="text"], input[type="number"], input[type="email"], input[type="password"] {
+  padding: 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  box-sizing: border-box;
+}
+
+input[type="checkbox"] {
+  margin-right: 5px;
+}
+
+label {
+  display: block;
+  margin: 5px 0;
+}
+
+/* Status indicators */
+.status-on {
+  color: green;
+  font-weight: bold;
+}
+
+.status-off {
+  color: red;
+  font-weight: bold;
+}
+
+.status-unknown {
+  color: orange;
+  font-weight: bold;
+}
+
+/* Form row styles for settings pages */
+.form-row {
+  display: flex;
+  margin-bottom: 15px;
+  align-items: center;
+}
+
+.form-label {
+  width: 40%;
+  padding-right: 10px;
+}
+
+.form-input {
+  width: 60%;
+}
+
+.form-input input[type="text"], 
+.form-input input[type="number"], 
+.form-input input[type="email"], 
+.form-input input[type="password"] {
+  width: 100%;
+}
+
+.form-input label {
+  display: inline-block;
+  margin-right: 15px;
+  margin-bottom: 0;
+}
+
+.form-input input[type="radio"] {
+  margin-right: 5px;
+}
+
+/* Active menu item */
+.menu a.active {
+  background-color: #007bff;
+  color: white;
+}
+
+/* Fieldset styles for legend boxes */
+fieldset {
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 15px;
+  margin: 0;
+}
+
+fieldset p {
+  margin: 8px 0;
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+/* Horizontal rule styling */
+hr {
+  border: none;
+  border-top: 1px solid #ddd;
+  margin: 20px 0;
+}
+
+/* Mobile responsive */
+@media (max-width: 768px) {
+  .form-row {
+      flex-direction: column;
+      align-items: flex-start;
+  }
+  .form-label, .form-input {
+      width: 100%;
+  }
+  .form-label {
+      margin-bottom: 5px;
+  }
+}
+
+@media (max-width: 480px) {
+  .menu {
+      width: 100%;
+      position: relative;
+      height: auto;
+  }
+  .content {
+      margin-left: 0;
+  }
+  .row {
+      flex-direction: column;
+  }
+  .grid-2, .grid-3, .grid-4 {
+      width: 100%;
+  }
+}
+
+/* Fan curve specific styles */
+.fan-curve-container {
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 15px;
+  margin: 10px 0;
+  background-color: #f9f9f9;
+}
+
+.fan-curve-point {
+  margin-bottom: 10px;
+}
+
+.fan-curve-point:last-child {
+  margin-bottom: 0;
+}
+
+.fan-curve-point .form-input {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.fan-curve-point .form-input input[type="number"] {
+  width: 80px;
+  margin-right: 5px;
+}
+
+.fan-curve-point .form-label {
+  min-width: 80px;
+  font-weight: bold;
+  color: #555;
+}
+
+/* Status info styling */
+#status-info {
+  background-color: #f0f8ff;
+  border-color: #007BFF;
+}
+
+#status-info p {
+  margin: 5px 0;
+  font-family: monospace;
+}

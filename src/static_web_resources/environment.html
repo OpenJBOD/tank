@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenJBOD - Environment Settings</title>
+    <link rel="stylesheet" href="/style.css">
+    <script src="environment.js"></script>
+</head>
+<body>
+    <div class="container">
+        <nav class="menu">
+            <ul>
+                <p class="menu-heading">OpenJBOD</p>
+                <li><a href="/">Overview</a></li>
+                <li><a href="/about">About</a></li>
+                <p class="menu-heading">Settings</p>
+                <li><a href="/network">Network</a></li>
+                <li><a href="/power">Power</a></li>
+                <li><a href="/http">HTTP</a></li>
+                <li><a href="/environment" class="active">Environment</a></li>
+                <li><a href="/users">Users</a></li>
+                <li><a href="/reset">Reset</a></li>
+            </ul>
+        </nav>
+        <main class="content">
+            <p class="heading">Settings - Environment</p>
+            <div class="row">
+                <div class="grid-2">
+                    <form id="environment-form">
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>Fan Control</b>
+                            </div>
+                            <div class="form-input">
+                                <label for="external_fan_control">
+                                    <input id="external_fan_control" type="checkbox" name="use_external_fan_control" />
+                                    Enable external fan control
+                                </label>
+                            </div>
+                        </div>
+                        
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>Update Interval (ms)</b>
+                            </div>
+                            <div class="form-input">
+                                <input type="number" id="fan_update_interval" name="fan_update_interval_ms" 
+                                       placeholder="5000" value="5000" min="1000" max="60000" />
+                            </div>
+                        </div>
+                        
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>Hysteresis (%)</b>
+                            </div>
+                            <div class="form-input">
+                                <input type="number" id="fan_hysteresis" name="fan_hysteresis_percent" 
+                                       placeholder="5" value="5" min="0" max="50" />
+                            </div>
+                        </div>
+                        
+                        <hr />
+                        
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>Fan Curve Configuration</b>
+                            </div>
+                        </div>
+                        
+                        <div class="fan-curve-container">
+                            <div class="fan-curve-point">
+                                <div class="form-row">
+                                    <div class="form-label">Point 1:</div>
+                                    <div class="form-input">
+                                        <input type="number" id="temp_0" name="temp_0" 
+                                               placeholder="20.0" step="0.1" min="-40" max="125" />°C
+                                        <input type="number" id="fan_0" name="fan_0" 
+                                               placeholder="0" min="0" max="100" />%
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="fan-curve-point">
+                                <div class="form-row">
+                                    <div class="form-label">Point 2:</div>
+                                    <div class="form-input">
+                                        <input type="number" id="temp_1" name="temp_1" 
+                                               placeholder="30.0" step="0.1" min="-40" max="125" />°C
+                                        <input type="number" id="fan_1" name="fan_1" 
+                                               placeholder="20" min="0" max="100" />%
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="fan-curve-point">
+                                <div class="form-row">
+                                    <div class="form-label">Point 3:</div>
+                                    <div class="form-input">
+                                        <input type="number" id="temp_2" name="temp_2" 
+                                               placeholder="40.0" step="0.1" min="-40" max="125" />°C
+                                        <input type="number" id="fan_2" name="fan_2" 
+                                               placeholder="40" min="0" max="100" />%
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="fan-curve-point">
+                                <div class="form-row">
+                                    <div class="form-label">Point 4:</div>
+                                    <div class="form-input">
+                                        <input type="number" id="temp_3" name="temp_3" 
+                                               placeholder="50.0" step="0.1" min="-40" max="125" />°C
+                                        <input type="number" id="fan_3" name="fan_3" 
+                                               placeholder="70" min="0" max="100" />%
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="fan-curve-point">
+                                <div class="form-row">
+                                    <div class="form-label">Point 5:</div>
+                                    <div class="form-input">
+                                        <input type="number" id="temp_4" name="temp_4" 
+                                               placeholder="60.0" step="0.1" min="-40" max="125" />°C
+                                        <input type="number" id="fan_4" name="fan_4" 
+                                               placeholder="100" min="0" max="100" />%
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <hr />
+                        <button type="submit">Save Environment Settings</button>
+                    </form>
+                </div>
+                <div class="grid-2">
+                    <p class="heading">Legend</p>
+                    <fieldset>
+                        <p><b>Enable External Fan Control</b> - This option <b>disables</b> the automatic fan curve response and lets you set the fan speed manually.</p>
+                        <p><b>Update Interval</b> - How often (in milliseconds) the fan control system checks the temperature and adjusts fan speed. Lower values provide more responsive control but use more CPU.</p>
+                        <p><b>Hysteresis</b> - Temperature difference (as percentage of temperature span) required before changing fan speed. Helps prevent oscillation between fan speeds.</p>
+                        <p><b>Fan Curve</b> - Five temperature/fan speed points that define the fan response curve. The system uses linear interpolation between points to determine fan speed at any temperature.</p>
+                        <p><b>Temperature Range</b> - Valid range is -40°C to +125°C (DS18B20 sensor limits).</p>
+                        <p><b>Fan Speed Range</b> - 0% to 100% where 0% is off and 100% is maximum speed.</p>
+                    </fieldset>
+                </div>
+            </div>
+        </main>
+    </div>
+</body>
+</html>

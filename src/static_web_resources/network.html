@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenJBOD - Network Settings</title>
+    <link rel="stylesheet" href="/style.css">
+    <script src="network.js"></script>
+</head>
+<body>
+    <div class="container">
+        <nav class="menu">
+            <ul>
+                <p class="menu-heading">OpenJBOD</p>
+                <li><a href="/">Overview</a></li>
+                <li><a href="/about">About</a></li>
+                <p class="menu-heading">Settings</p>
+                <li><a href="/network" class="active">Network</a></li>
+                <li><a href="/power">Power</a></li>
+                <li><a href="/http">HTTP</a></li>
+                <li><a href="/environment">Environment</a></li>
+                <li><a href="/users">Users</a></li>
+                <li><a href="/reset">Reset</a></li>
+            </ul>
+        </nav>
+        <main class="content">
+            <p class="heading">Settings - Network</p>
+            <div class="row">
+                <div class="grid-2">
+                    <form id="network-form">
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>Hostname</b>
+                            </div>
+                            <div class="form-input">
+                                <input type="text" id="hostname" name="hostname" placeholder="Hostname" value="" />
+                            </div>
+                        </div>
+                        
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>IP Configuration</b>
+                            </div>
+                            <div class="form-input">
+                                <label for="ip_dhcp">
+                                    <input id="ip_dhcp" type="radio" value="dhcp" name="ip_method" checked /> DHCP
+                                </label>
+                                <label for="ip_static">
+                                    <input id="ip_static" type="radio" value="static" name="ip_method" /> Static
+                                </label>
+                            </div>
+                        </div>
+                        
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>IP Address</b>
+                            </div>
+                            <div class="form-input">
+                                <input type="text" id="ip_address" name="ip_address" placeholder="IP Address" value="" />
+                            </div>
+                        </div>
+                        
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>Subnet Mask</b>
+                            </div>
+                            <div class="form-input">
+                                <input type="text" id="subnet_mask" name="subnet_mask" placeholder="Subnet Mask" value="" />
+                            </div>
+                        </div>
+                        
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>Gateway</b>
+                            </div>
+                            <div class="form-input">
+                                <input type="text" id="gateway_ip" name="gateway_ip" placeholder="Gateway" value="" />
+                            </div>
+                        </div>
+                        
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>DNS Server</b>
+                            </div>
+                            <div class="form-input">
+                                <input type="text" id="dns_ip" name="dns_ip" placeholder="DNS Server" value="" />
+                            </div>
+                        </div>
+
+                        <hr />
+
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>IPv6 Configuration</b>
+                            </div>
+                            <div class="form-input">
+                                <select id="ipv6_mode" name="ipv6_mode">
+                                    <option value="slaac">SLAAC</option>
+                                    <option value="dhcpv6">DHCPv6</option>
+                                    <option value="static">Static</option>
+                                    <option value="disabled">Disabled</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>IPv6 Address</b>
+                            </div>
+                            <div class="form-input">
+                                <input type="text" id="ipv6_address" name="ipv6_address" placeholder="IPv6 Address" value="" />
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>Prefix Length</b>
+                            </div>
+                            <div class="form-input">
+                                <input type="number" id="ipv6_prefix_length" name="ipv6_prefix_length" placeholder="Prefix Length" min="1" max="128" value="64" />
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>IPv6 Gateway</b>
+                            </div>
+                            <div class="form-input">
+                                <input type="text" id="ipv6_gateway" name="ipv6_gateway" placeholder="Default Gateway" value="" />
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>IPv6 DNS</b>
+                            </div>
+                            <div class="form-input">
+                                <input type="text" id="ipv6_dns" name="ipv6_dns" placeholder="IPv6 DNS Server" value="" />
+                            </div>
+                        </div>
+                        
+                        <hr />
+                        <button type="submit">Save Network Settings</button>
+                    </form>
+                </div>
+                <div class="grid-2">
+                    <p class="heading">Legend</p>
+                    <fieldset>
+                        <p><b>Hostname</b> - Sets the hostname the device will use for DHCP requests.</p>
+                        <p><b>IP Method</b> - Decides whether to use DHCP or static IP addressing.</p>
+                        <p><b>IP Address</b> - IPv4 Address of the device, only used with the static option above.</p>
+                        <p><b>Subnet Mask</b> - IPv4 subnet mask of the device, only used with the static option above.</p>
+                        <p><b>Gateway</b> - IPv4 gateway of the device, only used with the static option above.</p>
+                        <p><b>DNS</b> - IPv4 DNS IP for the device, only used with the static option above.</p>
+                        <p><b>IPv6 Configuration</b> - Select SLAAC, DHCPv6, Static, or Disabled.</p>
+                        <p><b>IPv6 Address &amp; Gateway</b> - Required when Static IPv6 mode is selected.</p>
+                        <p><b>IPv6 DNS</b> - Optional IPv6 resolver when using Static mode.</p>
+                    </fieldset>
+                </div>
+            </div>
+        </main>
+    </div>
+</body>
+</html>

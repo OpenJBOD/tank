@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenJBOD - Power Settings</title>
+    <link rel="stylesheet" href="/style.css">
+    <script src="power.js"></script>
+</head>
+<body>
+    <div class="container">
+        <nav class="menu">
+            <ul>
+                <p class="menu-heading">OpenJBOD</p>
+                <li><a href="/">Overview</a></li>
+                <li><a href="/about">About</a></li>
+                <p class="menu-heading">Settings</p>
+                <li><a href="/network">Network</a></li>
+                <li><a href="/power" class="active">Power</a></li>
+                <li><a href="/http">HTTP</a></li>
+                <li><a href="/environment">Environment</a></li>
+                <li><a href="/users">Users</a></li>
+                <li><a href="/reset">Reset</a></li>
+            </ul>
+        </nav>
+        <main class="content">
+            <p class="heading">Settings - Power</p>
+            <div class="row">
+                <div class="grid-2">
+                    <form id="power-form">
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>Ignore Power Switch</b>
+                            </div>
+                            <div class="form-input">
+                                <input type="checkbox" id="ignore_power_switch" name="ignore_power_switch" />
+                            </div>
+                        </div>
+                        
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>On Boot</b>
+                            </div>
+                            <div class="form-input">
+                                <input type="checkbox" id="on_boot" name="on_boot" />
+                            </div>
+                        </div>
+                        
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>On Boot Delay</b>
+                            </div>
+                            <div class="form-input">
+                                <input type="number" id="on_boot_delay" name="on_boot_delay" placeholder="On Boot Delay (Seconds)" value="0" min="0" max="300" />
+                            </div>
+                        </div>
+                        
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>Follow USB Power</b>
+                            </div>
+                            <div class="form-input">
+                                <input type="checkbox" id="follow_usb" name="follow_usb" />
+                            </div>
+                        </div>
+                        
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>Follow Delay</b>
+                            </div>
+                            <div class="form-input">
+                                <input type="number" id="follow_usb_delay" name="follow_usb_delay" placeholder="Follow Delay (Seconds)" value="5" min="0" max="300" />
+                            </div>
+                        </div>
+                        
+                        <hr />
+                        <button type="submit">Save Power Settings</button>
+                    </form>
+                </div>
+                <div class="grid-2">
+                    <p class="heading">Legend</p>
+                    <fieldset>
+                        <p><b>Ignore Power Switch</b> - This causes the controller to ignore the power button input.</p>
+                        <p><b>On Boot</b> - If enabled, this will ensure the ATX power supply is powered on after the controller boots. Mutually exclusive with Follow USB Power.</p>
+                        <p><b>On Boot Delay</b> - This is a timer in seconds that will elapse before the power supply is turned on.</p>
+                        <p><b>Follow USB Power</b> - The controller will start and stop the ATX power supply when it receives or stops receiving voltage from the microUSB port. This is mutually exclusive with <b>On Boot</b>.</p>
+                        <p><b>Follow Delay</b> - This is a timer in seconds that will elapse before the power supply is turned on/off when USB power changes.</p>
+                    </fieldset>
+                </div>
+            </div>
+        </main>
+    </div>
+</body>
+</html>

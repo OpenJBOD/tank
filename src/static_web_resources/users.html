@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenJBOD - User Settings</title>
+    <link rel="stylesheet" href="/style.css">
+    <script src="users.js"></script>
+</head>
+<body>
+    <div class="container">
+        <nav class="menu">
+            <ul>
+                <p class="menu-heading">OpenJBOD</p>
+                <li><a href="/">Overview</a></li>
+                <li><a href="/about">About</a></li>
+                <p class="menu-heading">Settings</p>
+                <li><a href="/network">Network</a></li>
+                <li><a href="/power">Power</a></li>
+                <li><a href="/http">HTTP</a></li>
+                <li><a href="/environment">Environment</a></li>
+                <li><a href="/users" class="active">Users</a></li>
+                <li><a href="/reset">Reset</a></li>
+            </ul>
+        </nav>
+        <main class="content">
+            <p class="heading">Settings - User Management</p>
+            <div class="row">
+                <div class="grid-2">
+                    <p class="heading">Current Users</p>
+                    <div id="users-list">
+                        <p>Loading users...</p>
+                    </div>
+                    
+                    <hr />
+                    
+                    <p class="heading">Add New User</p>
+                    <form id="add-user-form">
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>Username</b>
+                            </div>
+                            <div class="form-input">
+                                <input type="text" id="new_username" name="new_username" placeholder="Username" maxlength="31" required />
+                            </div>
+                        </div>
+                        
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>Password</b>
+                            </div>
+                            <div class="form-input">
+                                <input type="password" id="new_password" name="new_password" placeholder="Password" required />
+                            </div>
+                        </div>
+                        
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>Confirm Password</b>
+                            </div>
+                            <div class="form-input">
+                                <input type="password" id="confirm_password" name="confirm_password" placeholder="Confirm Password" required />
+                            </div>
+                        </div>
+                        
+                        <button type="submit">Add User</button>
+                    </form>
+                    
+                    <hr />
+                    
+                    <p class="heading">Change User Password</p>
+                    <form id="change-password-form">
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>Select User</b>
+                            </div>
+                            <div class="form-input">
+                                <select id="change_user_select" name="change_user_select" required>
+                                    <option value="">-- Select User --</option>
+                                </select>
+                            </div>
+                        </div>
+                        
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>New Password</b>
+                            </div>
+                            <div class="form-input">
+                                <input type="password" id="change_password" name="change_password" placeholder="New Password" required />
+                            </div>
+                        </div>
+                        
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>Confirm New Password</b>
+                            </div>
+                            <div class="form-input">
+                                <input type="password" id="change_confirm_password" name="change_confirm_password" placeholder="Confirm New Password" required />
+                            </div>
+                        </div>
+                        
+                        <button type="submit">Change Password</button>
+                    </form>
+                </div>
+                <div class="grid-2">
+                    <p class="heading">User Management</p>
+                    <fieldset>
+                        <p><b>Current Users</b> - List of all configured users on the system. Maximum of 5 users are supported.</p>
+                        <p><b>Add New User</b> - Create a new user account with username and password. Usernames must be unique and are case-sensitive.</p>
+                        <p><b>Change Password</b> - Update the password for an existing user account.</p>
+                        <p><b>Delete User</b> - Remove a user account from the system. This action cannot be undone.</p>
+                    </fieldset>
+                    
+                    <div id="status-messages" style="margin-top: 20px;">
+                        <!-- Status messages will appear here -->
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+</body>
+</html>
