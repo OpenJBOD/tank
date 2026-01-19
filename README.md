@@ -33,7 +33,7 @@ sudo apt install --no-install-recommends \
   gcc-multilib g++-multilib libsdl2-dev libmagic1
 ```
 
-(If working on ARM64/AArc64, omit `gcc-multilib` and `g++-multilib`.)
+(If working on ARM64/AArch64, omit `gcc-multilib` and `g++-multilib`.)
 
 ### 2. Install West, West SDK, and clone Tank
 
@@ -46,7 +46,7 @@ source venv/bin/activate
 pip install west
 
 # Clone Tank and establish a Zephyr workspace
-west init -m https://github.com/dviske/tank --mr main tank-workspace
+west init -m https://github.com/openjbod/tank --mr main tank-workspace
 
 # Fetch dependencies and install the West SDK
 cd tank-workspace
