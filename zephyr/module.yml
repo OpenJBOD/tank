@@ -1,0 +1,10 @@
+# Makes the OpenJBOD Tank repo a Zephyr module so it can ship out-of-tree drivers
+# and DT bindings (discovered for every image in the workspace, including the
+# MCUboot sysbuild image). Provides a fixed RP2040 flash driver (drivers/flash)
+# and a ROSC entropy driver (drivers/entropy); bindings live under dts/bindings.
+name: openjbod-tank
+build:
+  cmake: drivers
+  kconfig: drivers/Kconfig
+  settings:
+    dts_root: .

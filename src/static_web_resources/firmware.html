@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenJBOD - Firmware</title>
+    <link rel="stylesheet" href="/style.css">
+    <script src="/firmware.js"></script>
+    <script src="/common.js"></script>
+</head>
+<body>
+    <div class="container">
+        <nav class="menu">
+            <ul>
+                <p class="menu-heading">OpenJBOD</p>
+                <li><a href="/">Overview</a></li>
+                <li><a href="/about">About</a></li>
+                <p class="menu-heading">Settings</p>
+                <li><a href="/network">Network</a></li>
+                <li><a href="/power">Power</a></li>
+                <li><a href="/http">HTTP</a></li>
+                <li><a href="/environment">Environment</a></li>
+                <li><a href="/console">Console</a></li>
+                <li><a href="/users">Users</a></li>
+                <li><a href="/tokens">API Tokens</a></li>
+                <li><a href="/firmware" class="active">Firmware</a></li>
+                <li><a href="/reset">Reset</a></li>
+                <li><a href="#" id="logout-link">Log out</a></li>
+            </ul>
+        </nav>
+        <main class="content">
+            <p class="heading">Settings - Firmware Update</p>
+            <div class="row">
+                <div class="grid-2">
+                    <p class="heading">Current Firmware</p>
+                    <table>
+                        <tr><th>Software Version</th><td id="sw-version">Loading...</td></tr>
+                        <tr><th>Bootloader Version</th><td id="bootloader-version">Loading...</td></tr>
+                    </table>
+                </div>
+                <div class="grid-2"></div>
+            </div>
+            <div class="row">
+                <div class="grid-2">
+                    <p class="heading">Upload New Firmware</p>
+                    <p>Select a signed image (<code>zephyr.signed.bin</code>). The device stages
+                       it, reboots into it, and keeps it once it comes back up healthy; a bad
+                       image is rolled back automatically.</p>
+                    <input id="fw-file" type="file" accept=".bin">
+                    <button id="fw-upload">Upload &amp; Apply</button>
+                    <progress id="fw-progress" value="0" max="100" style="width:100%;display:none;"></progress>
+                    <p id="fw-status"></p>
+                </div>
+                <div class="grid-2"></div>
+            </div>
+        </main>
+    </div>
+</body>
+</html>

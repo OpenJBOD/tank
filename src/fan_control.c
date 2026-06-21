@@ -63,11 +63,10 @@ static uint8_t interpolate_fan_speed(float temp,
 /**
  * Calculate fan speed percentage based on temperature and fan curve from settings
  */
-static uint8_t calculate_fan_speed(float temperature)
+static uint8_t calculate_fan_speed(float temperature, const struct openjbod_settings *settings)
 {
-	const struct openjbod_settings *settings = openjbod_settings_get();
 	const struct fan_curve_point *curve = settings->environment.fan_curve;
-	
+
 	/* Find the appropriate segment in the fan curve */
 	for (int i = 0; i < 4; i++) {
 		if (temperature <= curve[i + 1].temperature) {
@@ -82,9 +81,9 @@ static uint8_t calculate_fan_speed(float temperature)
 /**
  * Apply hysteresis to prevent oscillation
  */
-static uint8_t apply_hysteresis(float current_temp, uint8_t calculated_percent)
+static uint8_t apply_hysteresis(float current_temp, uint8_t calculated_percent,
+				const struct openjbod_settings *settings)
 {
-	const struct openjbod_settings *settings = openjbod_settings_get();
 	uint8_t hysteresis_percent = settings->environment.fan_hysteresis_percent;
 	
 	/* Determine if temperature is increasing or decreasing */
@@ -120,36 +119,47 @@ static void fan_control_thread_func(void *arg1, void *arg2, void *arg3)
 	
 	while (fan_control_state.running) {
 		const struct openjbod_settings *settings = openjbod_settings_get();
-		
-		/* Check if external fan control is enabled or fan control is disabled */
+
+		/* Always refresh the shared temperature cache (even under external fan
+		 * control) so /api/status and other readers never trigger a blocking
+		 * conversion themselves.
+		 */
+		ret = temperature_read(&temp_data);
+		if (ret == 0) {
+			temperature_cache_store(&temp_data);
+		}
+
+		/* Under external fan control we only keep the cache warm, no PWM logic. */
 		if (settings->environment.use_external_fan_control) {
-			/* External fan control enabled, sleep longer */
-			k_msleep(settings->environment.fan_update_interval_ms * 2);
+			k_msleep(settings->environment.fan_update_interval_ms);
 			continue;
 		}
-		
-		/* Read temperature */
-		ret = temperature_read(&temp_data);
+
 		if (ret != 0) {
 			LOG_WRN("Failed to read temperature: %d", ret);
 			k_msleep(settings->environment.fan_update_interval_ms);
 			continue;
 		}
-		
-		/* Use DS18B20 temperature if valid, otherwise skip this cycle */
-		if (!temp_data.ds18b20_valid) {
-			LOG_WRN("DS18B20 temperature not valid, skipping fan control update");
+
+		/* Select the configured primary temperature source, with automatic
+		 * fallback (selected DS18B20 -> other DS18B20 -> RP2040 die).
+		 */
+		float current_temp;
+		const char *temp_src;
+		ret = temperature_get_active(&temp_data,
+					     settings->environment.primary_temp_source,
+					     &current_temp, &temp_src);
+		if (ret != 0) {
+			LOG_WRN("No valid temperature source, skipping fan control update");
 			k_msleep(settings->environment.fan_update_interval_ms);
 			continue;
 		}
-		
-		float current_temp = temp_data.ds18b20_temp;
-		
+
 		/* Calculate desired fan speed */
-		uint8_t calculated_percent = calculate_fan_speed(current_temp);
-		
+		uint8_t calculated_percent = calculate_fan_speed(current_temp, settings);
+
 		/* Apply hysteresis */
-		uint8_t target_percent = apply_hysteresis(current_temp, calculated_percent);
+		uint8_t target_percent = apply_hysteresis(current_temp, calculated_percent, settings);
 		
 		/* Convert percentage to duty cycle */
 		uint8_t duty = emc2301_percent_to_duty(target_percent);
@@ -159,8 +169,8 @@ static void fan_control_thread_func(void *arg1, void *arg2, void *arg3)
 		if (ret != 0) {
 			LOG_WRN("Failed to set fan PWM duty: %d", ret);
 		} else {
-			LOG_DBG("Temperature: %.2f°C, Fan speed: %d%% (duty: %d)",
-				(double)current_temp, target_percent, duty);
+			LOG_DBG("Temperature: %.2f°C (%s), Fan speed: %d%% (duty: %d)",
+				(double)current_temp, temp_src, target_percent, duty);
 		}
 		
 		/* Update state tracking */

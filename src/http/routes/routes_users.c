@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <zephyr/data/json.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/net/http/server.h>
 #include <zephyr/sys/util.h>
@@ -13,6 +14,45 @@
 #include "settings.h"
 
 LOG_MODULE_REGISTER(tank_http_users, LOG_LEVEL_INF);
+
+/* User-management request body: {"action":..,"username":..,"password":..}.
+ * Parsed with the JSON library instead of substring scanning. */
+struct user_req {
+	const char *action;
+	const char *username;
+	const char *password;
+};
+
+static const struct json_obj_descr user_req_descr[] = {
+	JSON_OBJ_DESCR_PRIM(struct user_req, action, JSON_TOK_STRING),
+	JSON_OBJ_DESCR_PRIM(struct user_req, username, JSON_TOK_STRING),
+	JSON_OBJ_DESCR_PRIM(struct user_req, password, JSON_TOK_STRING),
+};
+
+#define USER_REQ_ACTION   BIT(0)
+#define USER_REQ_USERNAME BIT(1)
+
+/* Returns NULL if the lengths are acceptable, else a user-facing error message.
+ * Pass username=NULL to skip the username check (e.g. password-only update). Keep
+ * the numbers in sync with USERNAME_MAX_CHARS / PASSWORD_MIN_LEN / PASSWORD_MAX_LEN. */
+static const char *creds_length_error(const char *username, const char *password)
+{
+	if (username) {
+		size_t ulen = strlen(username);
+
+		if (ulen == 0 || ulen > USERNAME_MAX_CHARS) {
+			return "Username must be 1-31 characters";
+		}
+	}
+	if (password) {
+		size_t plen = strlen(password);
+
+		if (plen < PASSWORD_MIN_LEN || plen > PASSWORD_MAX_LEN) {
+			return "Password must be 8-64 characters";
+		}
+	}
+	return NULL;
+}
 
 static int users_handler(struct http_client_ctx *client, enum http_data_status status,
 			 const struct http_request_ctx *request_ctx,
@@ -28,7 +68,7 @@ static int users_handler(struct http_client_ctx *client, enum http_data_status s
 	LOG_DBG("Users handler status %d, method %d", status, method);
 
 	if (status == HTTP_SERVER_DATA_FINAL) {
-		int auth_result = http_basic_auth_check(client);
+		int auth_result = http_check_auth(client);
 		if (auth_result != 0) {
 			LOG_WRN("Authentication failed for users endpoint");
 			http_send_auth_required_response(response_ctx);
@@ -104,13 +144,14 @@ static int users_handler(struct http_client_ctx *client, enum http_data_status s
 			post_payload_buf[cursor] = '\0';
 			cursor = 0;
 
-			char *action_start = strstr(post_payload_buf, "\"action\":");
-			char *username_start = strstr(post_payload_buf, "\"username\":");
-			char *password_start = strstr(post_payload_buf, "\"password\":");
+			struct user_req req = {0};
+			int parsed = json_obj_parse(post_payload_buf, strlen(post_payload_buf),
+						    user_req_descr, ARRAY_SIZE(user_req_descr), &req);
 
-			if (!action_start || !username_start) {
-				LOG_WRN("Missing required fields in user management request");
-				LOG_WRN("POST payload was: %s", post_payload_buf);
+			if (parsed < 0 ||
+			    (parsed & (USER_REQ_ACTION | USER_REQ_USERNAME)) !=
+				    (USER_REQ_ACTION | USER_REQ_USERNAME)) {
+				LOG_WRN("Missing/invalid required fields in user management request");
 				snprintf(response_buffer, sizeof(response_buffer),
 					 "{\"status\":\"error\",\"message\":\"Missing required fields\"}");
 				response_ctx->body = response_buffer;
@@ -120,49 +161,25 @@ static int users_handler(struct http_client_ctx *client, enum http_data_status s
 				return 0;
 			}
 
-			action_start += 9;
-			while (*action_start == ' ' || *action_start == '\t' || *action_start == '"') {
-				action_start++;
-			}
-			char *action_end = strchr(action_start, '"');
-			if (!action_end) {
-				LOG_WRN("Invalid action format");
-				response_ctx->status = HTTP_400_BAD_REQUEST;
-				return 0;
-			}
-			*action_end = '\0';
-
-			username_start += 11;
-			while (*username_start == ' ' || *username_start == '\t' || *username_start == '"') {
-				username_start++;
-			}
-			char *username_end = strchr(username_start, '"');
-			if (!username_end) {
-				LOG_WRN("Invalid username format");
-				response_ctx->status = HTTP_400_BAD_REQUEST;
-				return 0;
-			}
-			*username_end = '\0';
+			const char *action_start = req.action;
+			const char *username_start = req.username;
+			const char *password_start = req.password;  /* NULL if absent */
 
 			int result = 0;
 
 			if (strcmp(action_start, "create") == 0) {
+				const char *len_err = creds_length_error(username_start, password_start);
+
 				if (!password_start) {
 					LOG_WRN("Password required for create action");
 					snprintf(response_buffer, sizeof(response_buffer),
 						 "{\"status\":\"error\",\"message\":\"Password required\"}");
 					response_ctx->status = HTTP_400_BAD_REQUEST;
+				} else if (len_err) {
+					snprintf(response_buffer, sizeof(response_buffer),
+						 "{\"status\":\"error\",\"message\":\"%s\"}", len_err);
+					response_ctx->status = HTTP_400_BAD_REQUEST;
 				} else {
-					password_start += 11;
-					while (*password_start == ' ' || *password_start == '\t' ||
-					       *password_start == '"') {
-						password_start++;
-					}
-					char *password_end = strchr(password_start, '"');
-					if (password_end) {
-						*password_end = '\0';
-					}
-
 					result = openjbod_settings_create_user(username_start, password_start);
 					if (result >= 0) {
 						snprintf(response_buffer, sizeof(response_buffer),
@@ -175,22 +192,18 @@ static int users_handler(struct http_client_ctx *client, enum http_data_status s
 					}
 				}
 			} else if (strcmp(action_start, "update") == 0) {
+				const char *len_err = creds_length_error(NULL, password_start);
+
 				if (!password_start) {
 					LOG_WRN("Password required for update action");
 					snprintf(response_buffer, sizeof(response_buffer),
 						 "{\"status\":\"error\",\"message\":\"Password required\"}");
 					response_ctx->status = HTTP_400_BAD_REQUEST;
+				} else if (len_err) {
+					snprintf(response_buffer, sizeof(response_buffer),
+						 "{\"status\":\"error\",\"message\":\"%s\"}", len_err);
+					response_ctx->status = HTTP_400_BAD_REQUEST;
 				} else {
-					password_start += 11;
-					while (*password_start == ' ' || *password_start == '\t' ||
-					       *password_start == '"') {
-						password_start++;
-					}
-					char *password_end = strchr(password_start, '"');
-					if (password_end) {
-						*password_end = '\0';
-					}
-
 					result = openjbod_settings_update_user_password(username_start, password_start);
 					if (result == 0) {
 						snprintf(response_buffer, sizeof(response_buffer),

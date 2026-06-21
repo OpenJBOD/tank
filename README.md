@@ -14,8 +14,13 @@ The name **Tank** is a reference to Oracle/Sun documentation for ZFS naming exam
 ## Features not yet implemented
 
 At this time, the following features still need to be implemented:
-- [ ] External DS18B20 Temperature Sensor
-- [ ] UART over USB for debugging/logging
+- [x] External DS18B20 Temperature Sensor — optional probe on the GPIO11 pin
+      header; detected at boot and user-selectable as the primary temperature
+      source (with automatic fallback). See `api.md` and `TECH_DEBT.md` (web UI
+      still owed).
+- [x] UART over USB for debugging/logging — USB CDC-ACM console runs a second
+      Zephyr shell alongside the hardware UART; either console can be disabled in
+      settings. See `TECH_DEBT.md` (web UI toggle still owed).
 
 ## Development Environment Setup
 

@@ -1,0 +1,44 @@
+/*
+ * OpenJBOD 16 MB MCUboot partition layout, replacing the stock 2 MB sysbuild
+ * layout pulled in by the rpi_pico/rp2040/mcuboot board. Shared by the app
+ * overlay and sysbuild/mcuboot.overlay so both images agree on slot geometry.
+ *
+ * Keeps the board's second_stage_bootloader (@0) and boot_partition / mcuboot
+ * (@0x100). storage stays at 0x100000 (unchanged from the legacy layout) so
+ * existing settings survive the migration and every future A/B swap (it sits
+ * between, and outside, the two slots):
+ *
+ *   0x000000  second_stage_bootloader   256 B   (from board)
+ *   0x000100  boot_partition (mcuboot)  ~64 KB  (from board)
+ *   0x010000  slot0_partition (image-0) 960 KB
+ *   0x100000  storage_partition         512 KB  (settings - unchanged)
+ *   0x180000  slot1_partition (image-1) 960 KB
+ *             (~13.5 MB free above 0x270000)
+ *
+ * slot0 == slot1 size (required for swap; swap-using-move reserves one 4 KB
+ * sector, leaving ~956 KB usable - the app is ~520 KB).
+ */
+
+/delete-node/ &slot1_partition;
+/delete-node/ &storage_partition;
+
+&slot0_partition {
+	/* Resize the board's 832 KB slot0 to end exactly at 0x100000. */
+	reg = <0x00010000 0x000f0000>;
+};
+
+&flash0 {
+	reg = <0x10000000 DT_SIZE_M(16)>;
+
+	partitions {
+		storage_partition: partition@100000 {
+			label = "storage";
+			reg = <0x00100000 DT_SIZE_K(512)>;
+		};
+
+		slot1_partition: partition@180000 {
+			label = "image-1";
+			reg = <0x00180000 0x000f0000>;
+		};
+	};
+};

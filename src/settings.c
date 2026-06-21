@@ -6,6 +6,7 @@
 
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/kernel.h>
@@ -51,6 +52,7 @@ LOG_MODULE_REGISTER(tank_settings, LOG_LEVEL_INF);
 		.use_external_fan_control = false,                                              \
 		.fan_update_interval_ms = 5000,  /* Update every 5 seconds */                   \
 		.fan_hysteresis_percent = 5,     /* 5% hysteresis to prevent oscillation */     \
+		.primary_temp_source = 0,        /* 0 = onboard DS18B20 (GPIO18) */             \
 		.fan_curve = {                                                                 \
 			{20.0f, 0},    /* Below 20°C: 0% fan speed */                                 \
 			{30.0f, 20},   /* 30°C: 20% fan speed */                                      \
@@ -58,11 +60,25 @@ LOG_MODULE_REGISTER(tank_settings, LOG_LEVEL_INF);
 			{50.0f, 70},   /* 50°C: 70% fan speed */                                      \
 			{60.0f, 100}   /* 60°C and above: 100% fan speed */                            \
 		}                                                                               \
+	},                                                                                  \
+	.console = {                                                                        \
+		.uart_enabled = true,                                                           \
+		.usb_enabled = true                                                             \
 	}                                                                                   \
 }
 
 static const struct openjbod_settings default_settings = OPENJBOD_DEFAULT_SETTINGS_INITIALIZER;
 static struct openjbod_settings current_settings = OPENJBOD_DEFAULT_SETTINGS_INITIALIZER;
+
+/* Replace a heap-allocated settings string, freeing the previous value and taking
+ * ownership of newbuf (which may be NULL to clear). Used for the optional custom
+ * TLS certificate/key, which are kept off the always-resident settings struct.
+ */
+static void http_take_str(char **field, char *newbuf)
+{
+	free(*field);
+	*field = newbuf;
+}
 
 static int network_settings_set(const char *name, size_t len, settings_read_cb read_cb, void *cb_arg);
 static int network_settings_commit(void);
@@ -84,6 +100,10 @@ static int environment_settings_set(const char *name, size_t len, settings_read_
 static int environment_settings_commit(void);
 static int environment_settings_export(int (*cb)(const char *name, const void *value, size_t val_len));
 
+static int console_settings_set(const char *name, size_t len, settings_read_cb read_cb, void *cb_arg);
+static int console_settings_commit(void);
+static int console_settings_export(int (*cb)(const char *name, const void *value, size_t val_len));
+
 SETTINGS_STATIC_HANDLER_DEFINE(network, "network", NULL, network_settings_set,
 			       network_settings_commit, network_settings_export);
 
@@ -99,172 +119,127 @@ SETTINGS_STATIC_HANDLER_DEFINE(http, "http", NULL, http_settings_set,
 SETTINGS_STATIC_HANDLER_DEFINE(environment, "environment", NULL, environment_settings_set,
 			       environment_settings_commit, environment_settings_export);
 
-static const char *ipv6_mode_to_string(enum ipv6_mode mode)
+SETTINGS_STATIC_HANDLER_DEFINE(console, "console", NULL, console_settings_set,
+			       console_settings_commit, console_settings_export);
+
+/* ---- Table-driven settings fields -----------------------------------------
+ * Most settings groups are just a list of flat scalar/string fields. Describe
+ * them in a table and load/export them generically instead of repeating a
+ * strncmp chain and an export list per field. (Nested/variable fields - the
+ * fan curve, the heap-allocated certs, and the auth user array - are still
+ * handled explicitly by their group handlers.)
+ */
+enum sfield_type { SF_BLOB, SF_STR };
+
+struct sfield {
+	const char *name;   /* leaf key under the group */
+	size_t offset;      /* offset into struct openjbod_settings */
+	size_t size;        /* sizeof the field */
+	enum sfield_type type;
+};
+
+#define SF_BLOB_ENTRY(grp, fld) \
+	{ #fld, offsetof(struct openjbod_settings, grp.fld), \
+	  sizeof(((struct openjbod_settings *)0)->grp.fld), SF_BLOB }
+#define SF_STR_ENTRY(grp, fld) \
+	{ #fld, offsetof(struct openjbod_settings, grp.fld), \
+	  sizeof(((struct openjbod_settings *)0)->grp.fld), SF_STR }
+
+/* Load one leaf via the table. Returns 0 if handled, -ENOENT if not in table. */
+static int sfield_set(const struct sfield *tbl, size_t n, const char *name,
+		      size_t len, settings_read_cb read_cb, void *cb_arg)
 {
-	switch (mode) {
-	case IPV6_MODE_DISABLED:
-		return "disabled";
-	case IPV6_MODE_SLAAC:
-		return "slaac";
-	case IPV6_MODE_DHCPV6:
-		return "dhcpv6";
-	case IPV6_MODE_STATIC:
-		return "static";
-	default:
-		return "unknown";
+	const char *next;
+	size_t nlen = settings_name_next(name, &next);
+
+	if (next) {
+		return -ENOENT;  /* nested key (e.g. fan_curveN/...) - caller handles */
 	}
+
+	for (size_t i = 0; i < n; i++) {
+		if (strlen(tbl[i].name) != nlen || strncmp(name, tbl[i].name, nlen) != 0) {
+			continue;
+		}
+
+		void *dst = (uint8_t *)&current_settings + tbl[i].offset;
+
+		if (tbl[i].type == SF_BLOB) {
+			if (len != tbl[i].size) {
+				return -EINVAL;
+			}
+			return read_cb(cb_arg, dst, tbl[i].size) >= 0 ? 0 : -EIO;
+		}
+
+		/* SF_STR: stored without a trailing NUL; read len bytes and terminate. */
+		if (len >= tbl[i].size) {
+			return -EINVAL;
+		}
+		int rc = read_cb(cb_arg, dst, len);
+		if (rc >= 0) {
+			((char *)dst)[len] = '\0';
+		}
+		return rc >= 0 ? 0 : rc;
+	}
+
+	return -ENOENT;
 }
+
+/* Export all table fields under "<group>/<leaf>". */
+static int sfield_export(const char *group, const struct sfield *tbl, size_t n,
+			 int (*cb)(const char *name, const void *value, size_t val_len))
+{
+	char key[64];
+
+	for (size_t i = 0; i < n; i++) {
+		const void *src = (const uint8_t *)&current_settings + tbl[i].offset;
+		size_t vlen = (tbl[i].type == SF_STR) ? strlen((const char *)src) : tbl[i].size;
+
+		snprintf(key, sizeof(key), "%s/%s", group, tbl[i].name);
+		(void)cb(key, src, vlen);
+	}
+	return 0;
+}
+
+static const struct sfield network_fields[] = {
+	SF_BLOB_ENTRY(network, ip_method),
+	SF_STR_ENTRY(network, ip_addr),
+	SF_STR_ENTRY(network, gw_addr),
+	SF_STR_ENTRY(network, ip_mask),
+	SF_STR_ENTRY(network, dns1),
+	SF_STR_ENTRY(network, hostname),
+	SF_BLOB_ENTRY(network, ipv6_mode),
+	SF_STR_ENTRY(network, ipv6_addr),
+	SF_BLOB_ENTRY(network, ipv6_prefix_length),
+	SF_STR_ENTRY(network, ipv6_gateway),
+	SF_STR_ENTRY(network, ipv6_dns1),
+};
+
+static const struct sfield power_fields[] = {
+	SF_BLOB_ENTRY(power, ignore_power_switch),
+	SF_BLOB_ENTRY(power, on_boot),
+	SF_BLOB_ENTRY(power, on_boot_delay),
+	SF_BLOB_ENTRY(power, follow_usb),
+	SF_BLOB_ENTRY(power, follow_usb_delay),
+};
+
+/* http is not table-driven: enable_http/enable_https carry load-time validation
+ * (can't disable both) and custom_certificate/_private_key are heap-allocated. */
+
+static const struct sfield environment_fields[] = {
+	SF_BLOB_ENTRY(environment, use_external_fan_control),
+	SF_BLOB_ENTRY(environment, fan_update_interval_ms),
+	SF_BLOB_ENTRY(environment, fan_hysteresis_percent),
+	SF_BLOB_ENTRY(environment, primary_temp_source),
+};
+
+static const struct sfield console_fields[] = {
+	SF_BLOB_ENTRY(console, uart_enabled),
+	SF_BLOB_ENTRY(console, usb_enabled),
+};
 
 static int network_settings_set(const char *name, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
-	const char *next;
-	size_t name_len;
-	int rc;
-
-	name_len = settings_name_next(name, &next);
-
-	if (!next) {
-		if (!strncmp(name, "ip_method", name_len)) {
-			if (len != sizeof(current_settings.network.ip_method)) {
-				return -EINVAL;
-			}
-			rc = read_cb(cb_arg, &current_settings.network.ip_method, 
-				     sizeof(current_settings.network.ip_method));
-			if (rc >= 0) {
-				if(current_settings.network.ip_method == 0) {
-					LOG_INF("Loaded ip_method: DHCP");
-				} else if(current_settings.network.ip_method == 1) {
-					LOG_INF("Loaded ip_method: Static");
-				} else {
-					LOG_INF("??? illegal ip_method ???");
-				}
-			}
-			return 0;
-		}
-
-		if (!strncmp(name, "ip_addr", name_len)) {
-			if (len >= sizeof(current_settings.network.ip_addr)) {
-				return -EINVAL;
-			}
-			rc = read_cb(cb_arg, current_settings.network.ip_addr, len);
-			if (rc >= 0) {
-				current_settings.network.ip_addr[len] = '\0';
-				LOG_INF("Loaded ip_addr: %s", current_settings.network.ip_addr);
-			}
-			return 0;
-		}
-
-		if (!strncmp(name, "gw_addr", name_len)) {
-			if (len >= sizeof(current_settings.network.gw_addr)) {
-				return -EINVAL;
-			}
-			rc = read_cb(cb_arg, current_settings.network.gw_addr, len);
-			if (rc >= 0) {
-				current_settings.network.gw_addr[len] = '\0';
-				LOG_INF("Loaded gw_addr: %s", current_settings.network.gw_addr);
-			}
-			return 0;
-		}
-
-		if (!strncmp(name, "ip_mask", name_len)) {
-			if (len >= sizeof(current_settings.network.ip_mask)) {
-				return -EINVAL;
-			}
-			rc = read_cb(cb_arg, current_settings.network.ip_mask, len);
-			if (rc >= 0) {
-				current_settings.network.ip_mask[len] = '\0';
-				LOG_INF("Loaded ip_mask: %s", current_settings.network.ip_mask);
-			}
-			return 0;
-		}
-
-		if (!strncmp(name, "dns1", name_len)) {
-			if (len >= sizeof(current_settings.network.dns1)) {
-				return -EINVAL;
-			}
-			rc = read_cb(cb_arg, current_settings.network.dns1, len);
-			if (rc >= 0) {
-				current_settings.network.dns1[len] = '\0';
-				LOG_INF("Loaded dns1: %s", current_settings.network.dns1);
-			}
-			return 0;
-		}
-
-		if (!strncmp(name, "hostname", name_len)) {
-			if (len >= sizeof(current_settings.network.hostname)) {
-				return -EINVAL;
-			}
-			rc = read_cb(cb_arg, current_settings.network.hostname, len);
-			if (rc >= 0) {
-				current_settings.network.hostname[len] = '\0';
-				LOG_INF("Loaded hostname: %s", current_settings.network.hostname);
-			}
-			return 0;
-		}
-
-		if (!strncmp(name, "ipv6_mode", name_len)) {
-			if (len != sizeof(current_settings.network.ipv6_mode)) {
-				return -EINVAL;
-			}
-			rc = read_cb(cb_arg, &current_settings.network.ipv6_mode,
-				     sizeof(current_settings.network.ipv6_mode));
-			if (rc >= 0) {
-				LOG_INF("Loaded ipv6_mode: %s",
-					ipv6_mode_to_string(current_settings.network.ipv6_mode));
-			}
-			return 0;
-		}
-
-		if (!strncmp(name, "ipv6_addr", name_len)) {
-			if (len >= sizeof(current_settings.network.ipv6_addr)) {
-				return -EINVAL;
-			}
-			rc = read_cb(cb_arg, current_settings.network.ipv6_addr, len);
-			if (rc >= 0) {
-				current_settings.network.ipv6_addr[len] = '\0';
-				LOG_INF("Loaded ipv6_addr: %s", current_settings.network.ipv6_addr);
-			}
-			return 0;
-		}
-
-		if (!strncmp(name, "ipv6_prefix_length", name_len)) {
-			if (len != sizeof(current_settings.network.ipv6_prefix_length)) {
-				return -EINVAL;
-			}
-			rc = read_cb(cb_arg, &current_settings.network.ipv6_prefix_length,
-				     sizeof(current_settings.network.ipv6_prefix_length));
-			if (rc >= 0) {
-				LOG_INF("Loaded ipv6_prefix_length: %u",
-					current_settings.network.ipv6_prefix_length);
-			}
-			return 0;
-		}
-
-		if (!strncmp(name, "ipv6_gateway", name_len)) {
-			if (len >= sizeof(current_settings.network.ipv6_gateway)) {
-				return -EINVAL;
-			}
-			rc = read_cb(cb_arg, current_settings.network.ipv6_gateway, len);
-			if (rc >= 0) {
-				current_settings.network.ipv6_gateway[len] = '\0';
-				LOG_INF("Loaded ipv6_gateway: %s", current_settings.network.ipv6_gateway);
-			}
-			return 0;
-		}
-
-		if (!strncmp(name, "ipv6_dns1", name_len)) {
-			if (len >= sizeof(current_settings.network.ipv6_dns1)) {
-				return -EINVAL;
-			}
-			rc = read_cb(cb_arg, current_settings.network.ipv6_dns1, len);
-			if (rc >= 0) {
-				current_settings.network.ipv6_dns1[len] = '\0';
-				LOG_INF("Loaded ipv6_dns1: %s", current_settings.network.ipv6_dns1);
-			}
-			return 0;
-		}
-	}
-	return -ENOENT;
+	return sfield_set(network_fields, ARRAY_SIZE(network_fields), name, len, read_cb, cb_arg);
 }
 
 static int network_settings_commit(void)
@@ -275,105 +250,12 @@ static int network_settings_commit(void)
 
 static int network_settings_export(int (*cb)(const char *name, const void *value, size_t val_len))
 {
-	LOG_INF("Exporting network settings");
-	
-	(void)cb("network/ip_method", &current_settings.network.ip_method, 
-		 sizeof(current_settings.network.ip_method));
-	(void)cb("network/ip_addr", current_settings.network.ip_addr, 
-		 strlen(current_settings.network.ip_addr));
-	(void)cb("network/gw_addr", current_settings.network.gw_addr, 
-		 strlen(current_settings.network.gw_addr));
-	(void)cb("network/ip_mask", current_settings.network.ip_mask, 
-		 strlen(current_settings.network.ip_mask));
-	(void)cb("network/dns1", current_settings.network.dns1, 
-		 strlen(current_settings.network.dns1));
-	(void)cb("network/hostname", current_settings.network.hostname, 
-		 strlen(current_settings.network.hostname));
-	(void)cb("network/ipv6_mode", &current_settings.network.ipv6_mode,
-		 sizeof(current_settings.network.ipv6_mode));
-	(void)cb("network/ipv6_addr", current_settings.network.ipv6_addr,
-		 strlen(current_settings.network.ipv6_addr));
-	(void)cb("network/ipv6_prefix_length",
-		 &current_settings.network.ipv6_prefix_length,
-		 sizeof(current_settings.network.ipv6_prefix_length));
-	(void)cb("network/ipv6_gateway", current_settings.network.ipv6_gateway,
-		 strlen(current_settings.network.ipv6_gateway));
-	(void)cb("network/ipv6_dns1", current_settings.network.ipv6_dns1,
-		 strlen(current_settings.network.ipv6_dns1));
-
-	return 0;
+	return sfield_export("network", network_fields, ARRAY_SIZE(network_fields), cb);
 }
 
 static int power_settings_set(const char *name, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
-	const char *next;
-	size_t name_len;
-	int rc;
-
-	name_len = settings_name_next(name, &next);
-
-	if (!next) {
-		if (!strncmp(name, "ignore_power_switch", name_len)) {
-			if (len != sizeof(current_settings.power.ignore_power_switch)) {
-				return -EINVAL;
-			}
-			rc = read_cb(cb_arg, &current_settings.power.ignore_power_switch, 
-				     sizeof(current_settings.power.ignore_power_switch));
-			if (rc >= 0) {
-				LOG_INF("Loaded ignore_power_switch: %s", current_settings.power.ignore_power_switch ? "true" : "false");
-			}
-			return 0;
-		}
-
-		if (!strncmp(name, "on_boot", name_len)) {
-			if (len != sizeof(current_settings.power.on_boot)) {
-				return -EINVAL;
-			}
-			rc = read_cb(cb_arg, &current_settings.power.on_boot, 
-				     sizeof(current_settings.power.on_boot));
-			if (rc >= 0) {
-				LOG_INF("Loaded on_boot: %s", current_settings.power.on_boot ? "true" : "false");
-			}
-			return 0;
-		}
-
-		if (!strncmp(name, "on_boot_delay", name_len)) {
-			if (len != sizeof(current_settings.power.on_boot_delay)) {
-				return -EINVAL;
-			}
-			rc = read_cb(cb_arg, &current_settings.power.on_boot_delay, 
-				     sizeof(current_settings.power.on_boot_delay));
-			if (rc >= 0) {
-				LOG_INF("Loaded on_boot_delay: %u", current_settings.power.on_boot_delay);
-			}
-			return 0;
-		}
-
-		if (!strncmp(name, "follow_usb", name_len)) {
-			if (len != sizeof(current_settings.power.follow_usb)) {
-				return -EINVAL;
-			}
-			rc = read_cb(cb_arg, &current_settings.power.follow_usb, 
-				     sizeof(current_settings.power.follow_usb));
-			if (rc >= 0) {
-				LOG_INF("Loaded follow_usb: %s", current_settings.power.follow_usb ? "true" : "false");
-			}
-			return 0;
-		}
-
-		if (!strncmp(name, "follow_usb_delay", name_len)) {
-			if (len != sizeof(current_settings.power.follow_usb_delay)) {
-				return -EINVAL;
-			}
-			rc = read_cb(cb_arg, &current_settings.power.follow_usb_delay, 
-				     sizeof(current_settings.power.follow_usb_delay));
-			if (rc >= 0) {
-				LOG_INF("Loaded follow_usb_delay: %u", current_settings.power.follow_usb_delay);
-			}
-			return 0;
-		}
-	}
-	return -ENOENT;
+	return sfield_set(power_fields, ARRAY_SIZE(power_fields), name, len, read_cb, cb_arg);
 }
 
 static int power_settings_commit(void)
@@ -384,20 +266,7 @@ static int power_settings_commit(void)
 
 static int power_settings_export(int (*cb)(const char *name, const void *value, size_t val_len))
 {
-	LOG_INF("Exporting power settings");
-	
-	(void)cb("power/ignore_power_switch", &current_settings.power.ignore_power_switch, 
-		 sizeof(current_settings.power.ignore_power_switch));
-	(void)cb("power/on_boot", &current_settings.power.on_boot, 
-		 sizeof(current_settings.power.on_boot));
-	(void)cb("power/on_boot_delay", &current_settings.power.on_boot_delay, 
-		 sizeof(current_settings.power.on_boot_delay));
-	(void)cb("power/follow_usb", &current_settings.power.follow_usb, 
-		 sizeof(current_settings.power.follow_usb));
-	(void)cb("power/follow_usb_delay", &current_settings.power.follow_usb_delay, 
-		 sizeof(current_settings.power.follow_usb_delay));
-
-	return 0;
+	return sfield_export("power", power_fields, ARRAY_SIZE(power_fields), cb);
 }
 
 static int auth_settings_set(const char *name, size_t len, settings_read_cb read_cb, void *cb_arg)
@@ -458,7 +327,7 @@ static int auth_settings_set(const char *name, size_t len, settings_read_cb read
 			rc = read_cb(cb_arg, current_settings.auth.users[user_idx].username, len);
 			if (rc >= 0) {
 				current_settings.auth.users[user_idx].username[len] = '\0';
-				LOG_INF("Loaded user %d username: %s", user_idx, current_settings.auth.users[user_idx].username);
+				LOG_DBG("Loaded user %d username: %s", user_idx, current_settings.auth.users[user_idx].username);
 			}
 			return 0;
 		}
@@ -470,7 +339,7 @@ static int auth_settings_set(const char *name, size_t len, settings_read_cb read
 			rc = read_cb(cb_arg, current_settings.auth.users[user_idx].password_hash, len);
 			if (rc >= 0) {
 				current_settings.auth.users[user_idx].password_hash[len] = '\0';
-				LOG_INF("Loaded user %d password hash", user_idx);
+				LOG_DBG("Loaded user %d password hash", user_idx);
 			}
 			return 0;
 		}
@@ -482,7 +351,7 @@ static int auth_settings_set(const char *name, size_t len, settings_read_cb read
 			rc = read_cb(cb_arg, current_settings.auth.users[user_idx].salt, len);
 			if (rc >= 0) {
 				current_settings.auth.users[user_idx].salt[len] = '\0';
-				LOG_INF("Loaded user %d salt", user_idx);
+				LOG_DBG("Loaded user %d salt", user_idx);
 			}
 			return 0;
 		}
@@ -545,7 +414,7 @@ static int http_settings_set(const char *name, size_t len, settings_read_cb read
 					return -EINVAL;
 				}
 				current_settings.http.enable_http = new_value;
-				LOG_INF("Loaded enable_http: %s", current_settings.http.enable_http ? "true" : "false");
+				LOG_DBG("Loaded enable_http: %s", current_settings.http.enable_http ? "true" : "false");
 			}
 			return 0;
 		}
@@ -561,7 +430,7 @@ static int http_settings_set(const char *name, size_t len, settings_read_cb read
 					return -EINVAL;
 				}
 				current_settings.http.enable_https = new_value;
-				LOG_INF("Loaded enable_https: %s", current_settings.http.enable_https ? "true" : "false");
+				LOG_DBG("Loaded enable_https: %s", current_settings.http.enable_https ? "true" : "false");
 			}
 			return 0;
 		}
@@ -572,7 +441,7 @@ static int http_settings_set(const char *name, size_t len, settings_read_cb read
 			rc = read_cb(cb_arg, &current_settings.http.http_port, 
 				     sizeof(current_settings.http.http_port));
 			if (rc >= 0) {
-				LOG_INF("Loaded http_port: %u", current_settings.http.http_port);
+				LOG_DBG("Loaded http_port: %u", current_settings.http.http_port);
 			}
 			return 0;
 		}
@@ -583,7 +452,7 @@ static int http_settings_set(const char *name, size_t len, settings_read_cb read
 			rc = read_cb(cb_arg, &current_settings.http.https_port, 
 				     sizeof(current_settings.http.https_port));
 			if (rc >= 0) {
-				LOG_INF("Loaded https_port: %u", current_settings.http.https_port);
+				LOG_DBG("Loaded https_port: %u", current_settings.http.https_port);
 			}
 			return 0;
 		}
@@ -594,32 +463,46 @@ static int http_settings_set(const char *name, size_t len, settings_read_cb read
 			rc = read_cb(cb_arg, &current_settings.http.use_custom_certificates, 
 				     sizeof(current_settings.http.use_custom_certificates));
 			if (rc >= 0) {
-				LOG_INF("Loaded use_custom_certificates: %s", current_settings.http.use_custom_certificates ? "true" : "false");
+				LOG_DBG("Loaded use_custom_certificates: %s", current_settings.http.use_custom_certificates ? "true" : "false");
 			}
 			return 0;
 		}
 		if (!strncmp(name, "custom_certificate", name_len)) {
-			if (len > sizeof(current_settings.http.custom_certificate)) {
-				LOG_ERR("Certificate data too large: %zu > %zu", len, sizeof(current_settings.http.custom_certificate));
+			if (len >= CERTIFICATE_HEX_MAX_LEN) {
+				LOG_ERR("Certificate data too large: %zu >= %d", len, CERTIFICATE_HEX_MAX_LEN);
 				return -EINVAL;
 			}
-			rc = read_cb(cb_arg, current_settings.http.custom_certificate, len);
-			if (rc >= 0) {
-				current_settings.http.custom_certificate[len] = '\0'; /* Ensure null termination */
-				LOG_INF("Loaded custom_certificate: %zu chars", strlen(current_settings.http.custom_certificate));
+			char *buf = malloc(len + 1);
+			if (buf == NULL) {
+				return -ENOMEM;
 			}
+			rc = read_cb(cb_arg, buf, len);
+			if (rc < 0) {
+				free(buf);
+				return rc;
+			}
+			buf[rc] = '\0';
+			http_take_str(&current_settings.http.custom_certificate, buf);
+			LOG_DBG("Loaded custom_certificate: %d chars", rc);
 			return 0;
 		}
 		if (!strncmp(name, "custom_private_key", name_len)) {
-			if (len > sizeof(current_settings.http.custom_private_key)) {
-				LOG_ERR("Private key data too large: %zu > %zu", len, sizeof(current_settings.http.custom_private_key));
+			if (len >= PRIVATE_KEY_HEX_MAX_LEN) {
+				LOG_ERR("Private key data too large: %zu >= %d", len, PRIVATE_KEY_HEX_MAX_LEN);
 				return -EINVAL;
 			}
-			rc = read_cb(cb_arg, current_settings.http.custom_private_key, len);
-			if (rc >= 0) {
-				current_settings.http.custom_private_key[len] = '\0'; /* Ensure null termination */
-				LOG_INF("Loaded custom_private_key: %zu chars", strlen(current_settings.http.custom_private_key));
+			char *buf = malloc(len + 1);
+			if (buf == NULL) {
+				return -ENOMEM;
 			}
+			rc = read_cb(cb_arg, buf, len);
+			if (rc < 0) {
+				free(buf);
+				return rc;
+			}
+			buf[rc] = '\0';
+			http_take_str(&current_settings.http.custom_private_key, buf);
+			LOG_DBG("Loaded custom_private_key: %d chars", rc);
 			return 0;
 		}
 	}
@@ -644,11 +527,15 @@ static int http_settings_export(int (*cb)(const char *name, const void *value, s
 	(void)cb("http/use_custom_certificates", &current_settings.http.use_custom_certificates, sizeof(current_settings.http.use_custom_certificates));
 	
 	/* Only export certificate data if it exists */
-	if (strlen(current_settings.http.custom_certificate) > 0) {
-		(void)cb("http/custom_certificate", current_settings.http.custom_certificate, strlen(current_settings.http.custom_certificate));
+	if (current_settings.http.custom_certificate != NULL &&
+	    current_settings.http.custom_certificate[0] != '\0') {
+		(void)cb("http/custom_certificate", current_settings.http.custom_certificate,
+			 strlen(current_settings.http.custom_certificate));
 	}
-	if (strlen(current_settings.http.custom_private_key) > 0) {
-		(void)cb("http/custom_private_key", current_settings.http.custom_private_key, strlen(current_settings.http.custom_private_key));
+	if (current_settings.http.custom_private_key != NULL &&
+	    current_settings.http.custom_private_key[0] != '\0') {
+		(void)cb("http/custom_private_key", current_settings.http.custom_private_key,
+			 strlen(current_settings.http.custom_private_key));
 	}
 
 	return 0;
@@ -656,49 +543,11 @@ static int http_settings_export(int (*cb)(const char *name, const void *value, s
 
 static int environment_settings_set(const char *name, size_t len, settings_read_cb read_cb, void *cb_arg)
 {
-	const char *next;
-	size_t name_len;
 	int rc;
 
-	name_len = settings_name_next(name, &next);
-
-	if (!next) {
-		if (!strncmp(name, "use_external_fan_control", name_len)) {
-			if (len != sizeof(current_settings.environment.use_external_fan_control)) {
-				return -EINVAL;
-			}
-			rc = read_cb(cb_arg, &current_settings.environment.use_external_fan_control, 
-				     sizeof(current_settings.environment.use_external_fan_control));
-			if (rc >= 0) {
-				LOG_INF("Loaded use_external_fan_control: %s", 
-					current_settings.environment.use_external_fan_control ? "true" : "false");
-			}
-			return 0;
-		}
-		if (!strncmp(name, "fan_update_interval_ms", name_len)) {
-			if (len != sizeof(current_settings.environment.fan_update_interval_ms)) {
-				return -EINVAL;
-			}
-			rc = read_cb(cb_arg, &current_settings.environment.fan_update_interval_ms, 
-				     sizeof(current_settings.environment.fan_update_interval_ms));
-			if (rc >= 0) {
-				LOG_INF("Loaded fan_update_interval_ms: %u", 
-					current_settings.environment.fan_update_interval_ms);
-			}
-			return 0;
-		}
-		if (!strncmp(name, "fan_hysteresis_percent", name_len)) {
-			if (len != sizeof(current_settings.environment.fan_hysteresis_percent)) {
-				return -EINVAL;
-			}
-			rc = read_cb(cb_arg, &current_settings.environment.fan_hysteresis_percent, 
-				     sizeof(current_settings.environment.fan_hysteresis_percent));
-			if (rc >= 0) {
-				LOG_INF("Loaded fan_hysteresis_percent: %u", 
-					current_settings.environment.fan_hysteresis_percent);
-			}
-			return 0;
-		}
+	rc = sfield_set(environment_fields, ARRAY_SIZE(environment_fields), name, len, read_cb, cb_arg);
+	if (rc != -ENOENT) {
+		return rc;
 	}
 
 	/* Handle fan curve points */
@@ -718,7 +567,7 @@ static int environment_settings_set(const char *name, size_t len, settings_read_
 					rc = read_cb(cb_arg, &current_settings.environment.fan_curve[curve_idx].temperature, 
 						     sizeof(current_settings.environment.fan_curve[curve_idx].temperature));
 					if (rc >= 0) {
-						LOG_INF("Loaded fan_curve[%d].temperature: %.2f",
+						LOG_DBG("Loaded fan_curve[%d].temperature: %.2f",
 							curve_idx,
 							(double)current_settings.environment.fan_curve[curve_idx].temperature);
 					}
@@ -731,7 +580,7 @@ static int environment_settings_set(const char *name, size_t len, settings_read_
 					rc = read_cb(cb_arg, &current_settings.environment.fan_curve[curve_idx].fan_percent, 
 						     sizeof(current_settings.environment.fan_curve[curve_idx].fan_percent));
 					if (rc >= 0) {
-						LOG_INF("Loaded fan_curve[%d].fan_percent: %u", 
+						LOG_DBG("Loaded fan_curve[%d].fan_percent: %u", 
 							curve_idx, current_settings.environment.fan_curve[curve_idx].fan_percent);
 					}
 					return 0;
@@ -751,15 +600,8 @@ static int environment_settings_commit(void)
 
 static int environment_settings_export(int (*cb)(const char *name, const void *value, size_t val_len))
 {
-	LOG_INF("Exporting environment settings");
-	
-	(void)cb("environment/use_external_fan_control", &current_settings.environment.use_external_fan_control, 
-		 sizeof(current_settings.environment.use_external_fan_control));
-	(void)cb("environment/fan_update_interval_ms", &current_settings.environment.fan_update_interval_ms, 
-		 sizeof(current_settings.environment.fan_update_interval_ms));
-	(void)cb("environment/fan_hysteresis_percent", &current_settings.environment.fan_hysteresis_percent, 
-		 sizeof(current_settings.environment.fan_hysteresis_percent));
-	
+	sfield_export("environment", environment_fields, ARRAY_SIZE(environment_fields), cb);
+
 	/* Export fan curve points */
 	for (int i = 0; i < 5; i++) {
 		char temp_key[64];
@@ -770,12 +612,30 @@ static int environment_settings_export(int (*cb)(const char *name, const void *v
 		
 		(void)cb(temp_key, &current_settings.environment.fan_curve[i].temperature, 
 			 sizeof(current_settings.environment.fan_curve[i].temperature));
-		(void)cb(percent_key, &current_settings.environment.fan_curve[i].fan_percent, 
+		(void)cb(percent_key, &current_settings.environment.fan_curve[i].fan_percent,
 			 sizeof(current_settings.environment.fan_curve[i].fan_percent));
 	}
 
 	return 0;
 }
+
+static int console_settings_set(const char *name, size_t len, settings_read_cb read_cb, void *cb_arg)
+{
+	return sfield_set(console_fields, ARRAY_SIZE(console_fields), name, len, read_cb, cb_arg);
+}
+
+static int console_settings_commit(void)
+{
+	LOG_INF("Console settings loaded successfully");
+	return 0;
+}
+
+static int console_settings_export(int (*cb)(const char *name, const void *value, size_t val_len))
+{
+	return sfield_export("console", console_fields, ARRAY_SIZE(console_fields), cb);
+}
+
+static int ensure_default_user(void);
 
 int openjbod_settings_init(void)
 {
@@ -790,7 +650,15 @@ int openjbod_settings_init(void)
 	}
 
 	LOG_INF("Settings subsystem initialized successfully");
-	
+
+	/* Initialize PSA crypto once here (used for password hashing) rather than
+	 * on every hash call. psa_crypto_init() is idempotent.
+	 */
+	psa_status_t ps = psa_crypto_init();
+	if (ps != PSA_SUCCESS) {
+		LOG_WRN("PSA crypto init returned %d", (int)ps);
+	}
+
 	/* Test if FATFS file backend is accessible */
 	int test_val = 42;
 	rc = settings_save_one("test/init", &test_val, sizeof(test_val));
@@ -809,12 +677,17 @@ int openjbod_settings_load_all(void)
 	rc = settings_load();
 	if (rc) {
 		LOG_ERR("Settings load failed: %d", rc);
-		return rc;
+		/* Continue with in-RAM defaults; still provision a default user below. */
+	} else {
+		LOG_INF("Settings loaded: hostname=%s, ip_method=%d",
+			current_settings.network.hostname, current_settings.network.ip_method);
 	}
 
-	LOG_INF("Settings loaded: hostname=%s, ip_method=%d", 
-		current_settings.network.hostname, current_settings.network.ip_method);
-	return 0;
+	/* Provision the default admin user once, here, rather than as a surprising
+	 * side effect of the first credential check.
+	 */
+	ensure_default_user();
+	return rc;
 }
 
 int openjbod_settings_save_all(void)
@@ -836,103 +709,67 @@ struct openjbod_settings *openjbod_settings_get(void)
 	return &current_settings;
 }
 
+/* Persist a fixed-size value only if it differs from the cached copy, updating
+ * the cache on success. Avoids rewriting (and reloading) unchanged keys on every
+ * settings POST, which previously rewrote every field of a group and then reloaded
+ * the entire settings tree from the FAT file.
+ */
+static int save_blob_if_changed(const char *key, const void *new_v, void *cur_v, size_t sz)
+{
+	if (memcmp(new_v, cur_v, sz) == 0) {
+		return 0;
+	}
+	int rc = settings_save_one(key, new_v, sz);
+	if (rc) {
+		LOG_ERR("Failed to save %s: %d", key, rc);
+		return rc;
+	}
+	memcpy(cur_v, new_v, sz);
+	return 0;
+}
+
+/* As save_blob_if_changed, for NUL-terminated strings. Stored without the trailing
+ * NUL to match the load handlers (which copy len bytes and terminate).
+ */
+static int save_str_if_changed(const char *key, const char *new_s, char *cur_s, size_t cap)
+{
+	if (strcmp(new_s, cur_s) == 0) {
+		return 0;
+	}
+	int rc = settings_save_one(key, new_s, strlen(new_s));
+	if (rc) {
+		LOG_ERR("Failed to save %s: %d", key, rc);
+		return rc;
+	}
+	strncpy(cur_s, new_s, cap - 1);
+	cur_s[cap - 1] = '\0';
+	return 0;
+}
+
 int openjbod_settings_set_network(const struct network_settings *net)
 {
 	if (!net) {
 		return -EINVAL;
 	}
 
-	memcpy(&current_settings.network, net, sizeof(struct network_settings));
-	
-	/* Save individual settings */
+	struct network_settings *cur = &current_settings.network;
 	int rc;
-	
-	rc = settings_save_one("network/ip_method", &net->ip_method, sizeof(net->ip_method));
-	if (rc) {
-		LOG_ERR("Failed to save ip_method: %d", rc);
-		return rc;
-	}
-	
-	rc = settings_save_one("network/ip_addr", net->ip_addr, strlen(net->ip_addr));
-	if (rc) {
-		LOG_ERR("Failed to save ip_addr: %d", rc);
-		return rc;
-	}
-	
-	rc = settings_save_one("network/gw_addr", net->gw_addr, strlen(net->gw_addr));
-	if (rc) {
-		LOG_ERR("Failed to save gw_addr: %d", rc);
-		return rc;
-	}
-	
-	rc = settings_save_one("network/ip_mask", net->ip_mask, strlen(net->ip_mask));
-	if (rc) {
-		LOG_ERR("Failed to save ip_mask: %d", rc);
-		return rc;
-	}
-	
-	rc = settings_save_one("network/dns1", net->dns1, strlen(net->dns1));
-	if (rc) {
-		LOG_ERR("Failed to save dns1: %d", rc);
-		return rc;
-	}
-	
-	rc = settings_save_one("network/hostname", net->hostname, strlen(net->hostname));
-	if (rc) {
-		LOG_ERR("Failed to save hostname: %d", rc);
+
+	if ((rc = save_blob_if_changed("network/ip_method", &net->ip_method, &cur->ip_method, sizeof(cur->ip_method))) != 0 ||
+	    (rc = save_str_if_changed("network/ip_addr", net->ip_addr, cur->ip_addr, sizeof(cur->ip_addr))) != 0 ||
+	    (rc = save_str_if_changed("network/gw_addr", net->gw_addr, cur->gw_addr, sizeof(cur->gw_addr))) != 0 ||
+	    (rc = save_str_if_changed("network/ip_mask", net->ip_mask, cur->ip_mask, sizeof(cur->ip_mask))) != 0 ||
+	    (rc = save_str_if_changed("network/dns1", net->dns1, cur->dns1, sizeof(cur->dns1))) != 0 ||
+	    (rc = save_str_if_changed("network/hostname", net->hostname, cur->hostname, sizeof(cur->hostname))) != 0 ||
+	    (rc = save_blob_if_changed("network/ipv6_mode", &net->ipv6_mode, &cur->ipv6_mode, sizeof(cur->ipv6_mode))) != 0 ||
+	    (rc = save_str_if_changed("network/ipv6_addr", net->ipv6_addr, cur->ipv6_addr, sizeof(cur->ipv6_addr))) != 0 ||
+	    (rc = save_blob_if_changed("network/ipv6_prefix_length", &net->ipv6_prefix_length, &cur->ipv6_prefix_length, sizeof(cur->ipv6_prefix_length))) != 0 ||
+	    (rc = save_str_if_changed("network/ipv6_gateway", net->ipv6_gateway, cur->ipv6_gateway, sizeof(cur->ipv6_gateway))) != 0 ||
+	    (rc = save_str_if_changed("network/ipv6_dns1", net->ipv6_dns1, cur->ipv6_dns1, sizeof(cur->ipv6_dns1))) != 0) {
 		return rc;
 	}
 
-	LOG_INF("Network settings saved: hostname=%s, ip_method=%d", net->hostname, net->ip_method);
-
-	rc = settings_save_one("network/ipv6_mode", &net->ipv6_mode,
-			       sizeof(net->ipv6_mode));
-	if (rc) {
-		LOG_ERR("Failed to save ipv6_mode: %d", rc);
-		return rc;
-	}
-
-	rc = settings_save_one("network/ipv6_addr", net->ipv6_addr,
-			       strlen(net->ipv6_addr));
-	if (rc) {
-		LOG_ERR("Failed to save ipv6_addr: %d", rc);
-		return rc;
-	}
-
-	rc = settings_save_one("network/ipv6_prefix_length",
-			       &net->ipv6_prefix_length,
-			       sizeof(net->ipv6_prefix_length));
-	if (rc) {
-		LOG_ERR("Failed to save ipv6_prefix_length: %d", rc);
-		return rc;
-	}
-
-	rc = settings_save_one("network/ipv6_gateway", net->ipv6_gateway,
-			       strlen(net->ipv6_gateway));
-	if (rc) {
-		LOG_ERR("Failed to save ipv6_gateway: %d", rc);
-		return rc;
-	}
-
-	rc = settings_save_one("network/ipv6_dns1", net->ipv6_dns1,
-			       strlen(net->ipv6_dns1));
-	if (rc) {
-		LOG_ERR("Failed to save ipv6_dns1: %d", rc);
-		return rc;
-	}
-
-	LOG_INF("IPv6 settings saved: mode=%d, addr=%s/%u", net->ipv6_mode,
-		net->ipv6_addr, net->ipv6_prefix_length);
-	
-	/* Try to immediately reload to verify persistence */
-	rc = settings_load();
-	if (rc) {
-		LOG_WRN("Failed to reload settings for verification: %d", rc);
-	} else {
-		LOG_INF("Verification load: hostname=%s, ip_method=%d", 
-			current_settings.network.hostname, current_settings.network.ip_method);
-	}
-	
+	LOG_INF("Network settings saved (hostname=%s, ip_method=%d)", cur->hostname, cur->ip_method);
 	return 0;
 }
 
@@ -942,54 +779,18 @@ int openjbod_settings_set_power(const struct power_settings *power)
 		return -EINVAL;
 	}
 
-	memcpy(&current_settings.power, power, sizeof(struct power_settings));
-	
-	/* Save individual settings */
+	struct power_settings *cur = &current_settings.power;
 	int rc;
-	
-	rc = settings_save_one("power/ignore_power_switch", &power->ignore_power_switch, sizeof(power->ignore_power_switch));
-	if (rc) {
-		LOG_ERR("Failed to save ignore_power_switch: %d", rc);
-		return rc;
-	}
-	
-	rc = settings_save_one("power/on_boot", &power->on_boot, sizeof(power->on_boot));
-	if (rc) {
-		LOG_ERR("Failed to save on_boot: %d", rc);
-		return rc;
-	}
-	
-	rc = settings_save_one("power/on_boot_delay", &power->on_boot_delay, sizeof(power->on_boot_delay));
-	if (rc) {
-		LOG_ERR("Failed to save on_boot_delay: %d", rc);
-		return rc;
-	}
-	
-	rc = settings_save_one("power/follow_usb", &power->follow_usb, sizeof(power->follow_usb));
-	if (rc) {
-		LOG_ERR("Failed to save follow_usb: %d", rc);
-		return rc;
-	}
-	
-	rc = settings_save_one("power/follow_usb_delay", &power->follow_usb_delay, sizeof(power->follow_usb_delay));
-	if (rc) {
-		LOG_ERR("Failed to save follow_usb_delay: %d", rc);
+
+	if ((rc = save_blob_if_changed("power/ignore_power_switch", &power->ignore_power_switch, &cur->ignore_power_switch, sizeof(cur->ignore_power_switch))) != 0 ||
+	    (rc = save_blob_if_changed("power/on_boot", &power->on_boot, &cur->on_boot, sizeof(cur->on_boot))) != 0 ||
+	    (rc = save_blob_if_changed("power/on_boot_delay", &power->on_boot_delay, &cur->on_boot_delay, sizeof(cur->on_boot_delay))) != 0 ||
+	    (rc = save_blob_if_changed("power/follow_usb", &power->follow_usb, &cur->follow_usb, sizeof(cur->follow_usb))) != 0 ||
+	    (rc = save_blob_if_changed("power/follow_usb_delay", &power->follow_usb_delay, &cur->follow_usb_delay, sizeof(cur->follow_usb_delay))) != 0) {
 		return rc;
 	}
 
-	LOG_INF("Power settings saved: ignore_power_switch=%s, on_boot=%s, on_boot_delay=%u, follow_usb=%s, follow_usb_delay=%u", 
-		power->ignore_power_switch ? "true" : "false",
-		power->on_boot ? "true" : "false", power->on_boot_delay,
-		power->follow_usb ? "true" : "false", power->follow_usb_delay);
-	
-	/* Try to immediately reload to verify persistence */
-	rc = settings_load();
-	if (rc) {
-		LOG_WRN("Failed to reload settings for verification: %d", rc);
-	} else {
-		LOG_INF("Verification load successful");
-	}
-	
+	LOG_INF("Power settings saved");
 	return 0;
 }
 
@@ -999,75 +800,34 @@ int openjbod_settings_set_http(const struct http_settings *http)
 		return -EINVAL;
 	}
 
-	memcpy(&current_settings.http, http, sizeof(struct http_settings));
-	
-	/* Save individual settings */
+	struct http_settings *cur = &current_settings.http;
 	int rc;
-	
-	rc = settings_save_one("http/enable_http", &http->enable_http, sizeof(http->enable_http));
-	if (rc) {
-		LOG_ERR("Failed to save enable_http: %d", rc);
+
+	if ((rc = save_blob_if_changed("http/enable_http", &http->enable_http, &cur->enable_http, sizeof(cur->enable_http))) != 0 ||
+	    (rc = save_blob_if_changed("http/enable_https", &http->enable_https, &cur->enable_https, sizeof(cur->enable_https))) != 0 ||
+	    (rc = save_blob_if_changed("http/http_port", &http->http_port, &cur->http_port, sizeof(cur->http_port))) != 0 ||
+	    (rc = save_blob_if_changed("http/https_port", &http->https_port, &cur->https_port, sizeof(cur->https_port))) != 0 ||
+	    (rc = save_blob_if_changed("http/use_custom_certificates", &http->use_custom_certificates, &cur->use_custom_certificates, sizeof(cur->use_custom_certificates))) != 0) {
 		return rc;
-	}
-	
-	rc = settings_save_one("http/enable_https", &http->enable_https, sizeof(http->enable_https));
-	if (rc) {
-		LOG_ERR("Failed to save enable_https: %d", rc);
-		return rc;
-	}
-	
-	rc = settings_save_one("http/http_port", &http->http_port, sizeof(http->http_port));
-	if (rc) {
-		LOG_ERR("Failed to save http_port: %d", rc);
-		return rc;
-	}
-	
-	rc = settings_save_one("http/https_port", &http->https_port, sizeof(http->https_port));
-	if (rc) {
-		LOG_ERR("Failed to save https_port: %d", rc);
-		return rc;
-	}
-	
-	rc = settings_save_one("http/use_custom_certificates", &http->use_custom_certificates, sizeof(http->use_custom_certificates));
-	if (rc) {
-		LOG_ERR("Failed to save use_custom_certificates: %d", rc);
-		return rc;
-	}
-	
-	/* Save certificate data if it exists */
-	if (strlen(http->custom_certificate) > 0) {
-		rc = settings_save_one("http/custom_certificate", http->custom_certificate, strlen(http->custom_certificate));
-		if (rc) {
-			LOG_ERR("Failed to save custom_certificate: %d", rc);
-			return rc;
-		}
-		LOG_INF("Saved custom certificate (%zu chars)", strlen(http->custom_certificate));
-	}
-	
-	if (strlen(http->custom_private_key) > 0) {
-		rc = settings_save_one("http/custom_private_key", http->custom_private_key, strlen(http->custom_private_key));
-		if (rc) {
-			LOG_ERR("Failed to save custom_private_key: %d", rc);
-			return rc;
-		}
-		LOG_INF("Saved custom private key (%zu chars)", strlen(http->custom_private_key));
 	}
 
-	LOG_INF("HTTP settings saved: enable_http=%s, enable_https=%s, http_port=%u, https_port=%u, use_custom_certificates=%s", 
-		http->enable_http ? "true" : "false",
-		http->enable_https ? "true" : "false", 
-		http->http_port, http->https_port,
-		http->use_custom_certificates ? "true" : "false");
-	
-	/* Try to immediately reload to verify persistence */
-	rc = settings_load();
-	if (rc) {
-		LOG_WRN("Failed to reload settings for verification: %d", rc);
-	} else {
-		LOG_INF("Verification load successful");
-	}
-	
+	/* Certificate/key are not modified through this path; they are managed
+	 * separately via openjbod_settings_take_custom_certificate()/_private_key()
+	 * (the /api/certificates upload path) to keep their large buffers off the
+	 * always-resident settings struct.
+	 */
+	LOG_INF("HTTP settings saved");
 	return 0;
+}
+
+void openjbod_settings_take_custom_certificate(char *hex_or_null)
+{
+	http_take_str(&current_settings.http.custom_certificate, hex_or_null);
+}
+
+void openjbod_settings_take_custom_private_key(char *hex_or_null)
+{
+	http_take_str(&current_settings.http.custom_private_key, hex_or_null);
 }
 
 static int generate_salt(char *salt_buf, size_t salt_len)
@@ -1098,12 +858,7 @@ static int hash_password_with_salt(const char *password, const char *salt, char 
 	size_t hash_output_len;
 	size_t b64_output_len;
 
-	/* Initialize PSA crypto */
-	status = psa_crypto_init();
-	if (status != PSA_SUCCESS) {
-		LOG_ERR("PSA crypto initialization failed: %d", status);
-		return -EIO;
-	}
+	/* PSA crypto is initialized once in openjbod_settings_init(). */
 
 	/* Start hash operation */
 	status = psa_hash_setup(&operation, PSA_ALG_SHA_256);
@@ -1240,9 +995,67 @@ int openjbod_settings_set_auth(const struct auth_settings *auth)
 	return 0;
 }
 
+/* Constant-time comparison of two len-byte ranges. Returns 0 iff equal, without
+ * an early-out that would leak how many leading bytes matched.
+ */
+static int ct_memcmp(const void *a, const void *b, size_t len)
+{
+	const volatile uint8_t *pa = (const volatile uint8_t *)a;
+	const volatile uint8_t *pb = (const volatile uint8_t *)b;
+	uint8_t diff = 0;
+
+	for (size_t i = 0; i < len; i++) {
+		diff |= (uint8_t)(pa[i] ^ pb[i]);
+	}
+	return diff;
+}
+
+/* Create the default 'admin' user (password 'openjbod') if no users exist.
+ * Called once at startup from openjbod_settings_load_all().
+ */
+static int ensure_default_user(void)
+{
+	for (int i = 0; i < MAX_USERS; i++) {
+		if (strlen(current_settings.auth.users[i].username) > 0) {
+			return 0;
+		}
+	}
+
+	LOG_WRN("No users configured; creating default 'admin' user "
+		"(password 'openjbod') - change it immediately");
+
+	char salt[SALT_STR_LEN];
+	char hash[PASSWORD_HASH_LEN];
+	int rc = generate_salt(salt, sizeof(salt));
+	if (rc) {
+		LOG_ERR("Failed to generate salt: %d", rc);
+		return rc;
+	}
+	rc = hash_password_with_salt("openjbod", salt, hash, sizeof(hash));
+	if (rc) {
+		LOG_ERR("Failed to hash default password: %d", rc);
+		return rc;
+	}
+
+	struct user_entry *u = &current_settings.auth.users[0];
+	strncpy(u->username, "admin", sizeof(u->username) - 1);
+	u->username[sizeof(u->username) - 1] = '\0';
+	strncpy(u->password_hash, hash, sizeof(u->password_hash) - 1);
+	u->password_hash[sizeof(u->password_hash) - 1] = '\0';
+	strncpy(u->salt, salt, sizeof(u->salt) - 1);
+	u->salt[sizeof(u->salt) - 1] = '\0';
+
+	rc = openjbod_settings_save_user(0, u);
+	if (rc) {
+		LOG_ERR("Failed to save default user: %d", rc);
+	}
+	return rc;
+}
+
 int openjbod_auth_verify_credentials(const char *username, const char *password)
 {
-	char calculated_hash[PASSWORD_HASH_LEN];
+	char calculated_hash[PASSWORD_HASH_LEN] = {0};
+	char stored_hash[PASSWORD_HASH_LEN] = {0};
 	int rc;
 	int user_idx;
 
@@ -1250,70 +1063,30 @@ int openjbod_auth_verify_credentials(const char *username, const char *password)
 		return -EINVAL;
 	}
 
-	/* Check if any users exist, if not create default admin user */
-	bool has_users = false;
-	for (int i = 0; i < MAX_USERS; i++) {
-		if (strlen(current_settings.auth.users[i].username) > 0) {
-			has_users = true;
-			break;
-		}
-	}
-
-	if (!has_users) {
-		LOG_INF("No users configured, setting up default admin user");
-		
-		/* Generate salt for default password */
-		char salt[SALT_STR_LEN];
-		rc = generate_salt(salt, sizeof(salt));
-		if (rc) {
-			LOG_ERR("Failed to generate salt: %d", rc);
-			return rc;
-		}
-
-		/* Hash the default password "openjbod" */
-		rc = hash_password_with_salt("openjbod", salt, calculated_hash, sizeof(calculated_hash));
-		if (rc) {
-			LOG_ERR("Failed to hash default password: %d", rc);
-			return rc;
-		}
-
-		/* Set up default admin user in slot 0 */
-		strncpy(current_settings.auth.users[0].username, "admin", sizeof(current_settings.auth.users[0].username) - 1);
-		strncpy(current_settings.auth.users[0].password_hash, calculated_hash, sizeof(current_settings.auth.users[0].password_hash) - 1);
-		strncpy(current_settings.auth.users[0].salt, salt, sizeof(current_settings.auth.users[0].salt) - 1);
-		current_settings.auth.users[0].username[sizeof(current_settings.auth.users[0].username) - 1] = '\0';
-		current_settings.auth.users[0].password_hash[sizeof(current_settings.auth.users[0].password_hash) - 1] = '\0';
-		current_settings.auth.users[0].salt[sizeof(current_settings.auth.users[0].salt) - 1] = '\0';
-
-		/* Save to persistent storage */
-		rc = openjbod_settings_save_user(0, &current_settings.auth.users[0]);
-		if (rc) {
-			LOG_ERR("Failed to save default user: %d", rc);
-			return rc;
-		}
-	}
-
-	/* Find user by username */
 	user_idx = find_user_by_username(username);
 	if (user_idx < 0) {
 		LOG_WRN("Authentication failed: user '%s' not found", username);
 		return -EACCES;
 	}
 
-	/* Hash provided password with stored salt */
-	rc = hash_password_with_salt(password, current_settings.auth.users[user_idx].salt, calculated_hash, sizeof(calculated_hash));
+	rc = hash_password_with_salt(password, current_settings.auth.users[user_idx].salt,
+				     calculated_hash, sizeof(calculated_hash));
 	if (rc) {
 		LOG_ERR("Failed to hash provided password: %d", rc);
 		return rc;
 	}
 
-	/* Compare hashes */
-	if (strcmp(calculated_hash, current_settings.auth.users[user_idx].password_hash) != 0) {
+	/* Constant-time compare over the full zero-padded buffers (the base64 hash
+	 * is a fixed length, so this leaks nothing useful).
+	 */
+	strncpy(stored_hash, current_settings.auth.users[user_idx].password_hash,
+		sizeof(stored_hash) - 1);
+	if (ct_memcmp(calculated_hash, stored_hash, PASSWORD_HASH_LEN) != 0) {
 		LOG_WRN("Authentication failed: invalid password for user '%s'", username);
 		return -EACCES;
 	}
 
-	LOG_INF("Authentication successful for user: %s", username);
+	LOG_DBG("Authentication successful for user: %s", username);
 	return 0;
 }
 
@@ -1332,7 +1105,18 @@ int openjbod_settings_delete_user(int user_idx)
 
 int openjbod_settings_create_user(const char *username, const char *password)
 {
-	if (!username || !password || strlen(username) == 0) {
+	if (!username || !password) {
+		return -EINVAL;
+	}
+
+	size_t ulen = strlen(username);
+	size_t plen = strlen(password);
+
+	/* Reject (don't silently truncate) out-of-range credentials. */
+	if (ulen == 0 || ulen > USERNAME_MAX_CHARS) {
+		return -EINVAL;
+	}
+	if (plen < PASSWORD_MIN_LEN || plen > PASSWORD_MAX_LEN) {
 		return -EINVAL;
 	}
 
@@ -1394,68 +1178,54 @@ int openjbod_settings_set_environment(const struct environment_settings *environ
 		return -EINVAL;
 	}
 
-	memcpy(&current_settings.environment, environment, sizeof(struct environment_settings));
-	
-	/* Save individual settings */
+	struct environment_settings *cur = &current_settings.environment;
 	int rc;
-	
-	rc = settings_save_one("environment/use_external_fan_control", &environment->use_external_fan_control, 
-			       sizeof(environment->use_external_fan_control));
-	if (rc) {
-		LOG_ERR("Failed to save use_external_fan_control: %d", rc);
+
+	if ((rc = save_blob_if_changed("environment/use_external_fan_control", &environment->use_external_fan_control, &cur->use_external_fan_control, sizeof(cur->use_external_fan_control))) != 0 ||
+	    (rc = save_blob_if_changed("environment/fan_update_interval_ms", &environment->fan_update_interval_ms, &cur->fan_update_interval_ms, sizeof(cur->fan_update_interval_ms))) != 0 ||
+	    (rc = save_blob_if_changed("environment/fan_hysteresis_percent", &environment->fan_hysteresis_percent, &cur->fan_hysteresis_percent, sizeof(cur->fan_hysteresis_percent))) != 0 ||
+	    (rc = save_blob_if_changed("environment/primary_temp_source", &environment->primary_temp_source, &cur->primary_temp_source, sizeof(cur->primary_temp_source))) != 0) {
 		return rc;
 	}
-	
-	rc = settings_save_one("environment/fan_update_interval_ms", &environment->fan_update_interval_ms, 
-			       sizeof(environment->fan_update_interval_ms));
-	if (rc) {
-		LOG_ERR("Failed to save fan_update_interval_ms: %d", rc);
-		return rc;
-	}
-	
-	rc = settings_save_one("environment/fan_hysteresis_percent", &environment->fan_hysteresis_percent, 
-			       sizeof(environment->fan_hysteresis_percent));
-	if (rc) {
-		LOG_ERR("Failed to save fan_hysteresis_percent: %d", rc);
-		return rc;
-	}
-	
-	/* Save fan curve points */
+
+	/* Fan curve points */
 	for (int i = 0; i < 5; i++) {
-		char temp_key[64];
-		char percent_key[64];
-		
-		snprintf(temp_key, sizeof(temp_key), "environment/fan_curve%d/temperature", i);
-		snprintf(percent_key, sizeof(percent_key), "environment/fan_curve%d/fan_percent", i);
-		
-		rc = settings_save_one(temp_key, &environment->fan_curve[i].temperature, 
-				       sizeof(environment->fan_curve[i].temperature));
+		char key[64];
+
+		snprintf(key, sizeof(key), "environment/fan_curve%d/temperature", i);
+		rc = save_blob_if_changed(key, &environment->fan_curve[i].temperature,
+					  &cur->fan_curve[i].temperature, sizeof(cur->fan_curve[i].temperature));
 		if (rc) {
-			LOG_ERR("Failed to save fan_curve[%d].temperature: %d", i, rc);
 			return rc;
 		}
-		
-		rc = settings_save_one(percent_key, &environment->fan_curve[i].fan_percent, 
-				       sizeof(environment->fan_curve[i].fan_percent));
+		snprintf(key, sizeof(key), "environment/fan_curve%d/fan_percent", i);
+		rc = save_blob_if_changed(key, &environment->fan_curve[i].fan_percent,
+					  &cur->fan_curve[i].fan_percent, sizeof(cur->fan_curve[i].fan_percent));
 		if (rc) {
-			LOG_ERR("Failed to save fan_curve[%d].fan_percent: %d", i, rc);
 			return rc;
 		}
 	}
 
-	LOG_INF("Environment settings saved: use_external_fan_control=%s, fan_update_interval_ms=%u, fan_hysteresis_percent=%u", 
-		environment->use_external_fan_control ? "true" : "false",
-		environment->fan_update_interval_ms, 
-		environment->fan_hysteresis_percent);
-	
-	/* Try to immediately reload to verify persistence */
-	rc = settings_load();
-	if (rc) {
-		LOG_WRN("Failed to reload settings for verification: %d", rc);
-	} else {
-		LOG_INF("Verification load successful");
+	LOG_INF("Environment settings saved");
+	return 0;
+}
+
+int openjbod_settings_set_console(const struct console_settings *console)
+{
+	int rc;
+
+	if (!console) {
+		return -EINVAL;
 	}
-	
+
+	struct console_settings *cur = &current_settings.console;
+
+	if ((rc = save_blob_if_changed("console/uart_enabled", &console->uart_enabled, &cur->uart_enabled, sizeof(cur->uart_enabled))) != 0 ||
+	    (rc = save_blob_if_changed("console/usb_enabled", &console->usb_enabled, &cur->usb_enabled, sizeof(cur->usb_enabled))) != 0) {
+		return rc;
+	}
+
+	LOG_INF("Console settings saved");
 	return 0;
 }
 
@@ -1467,6 +1237,10 @@ int openjbod_settings_reset_all(void)
 		return rc;
 	}
 
+	/* Free heap-allocated fields before the struct copy clobbers their pointers. */
+	http_take_str(&current_settings.http.custom_certificate, NULL);
+	http_take_str(&current_settings.http.custom_private_key, NULL);
+
 	current_settings = default_settings;
 	LOG_INF("Settings reset to defaults in memory and %s removed", CONFIG_SETTINGS_FILE_PATH);
 
@@ -1476,6 +1250,12 @@ int openjbod_settings_reset_all(void)
 int openjbod_settings_update_user_password(const char *username, const char *new_password)
 {
 	if (!username || !new_password) {
+		return -EINVAL;
+	}
+
+	size_t plen = strlen(new_password);
+
+	if (plen < PASSWORD_MIN_LEN || plen > PASSWORD_MAX_LEN) {
 		return -EINVAL;
 	}
 

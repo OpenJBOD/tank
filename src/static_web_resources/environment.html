@@ -6,6 +6,7 @@
     <title>OpenJBOD - Environment Settings</title>
     <link rel="stylesheet" href="/style.css">
     <script src="environment.js"></script>
+    <script src="/common.js"></script>
 </head>
 <body>
     <div class="container">
@@ -19,8 +20,12 @@
                 <li><a href="/power">Power</a></li>
                 <li><a href="/http">HTTP</a></li>
                 <li><a href="/environment" class="active">Environment</a></li>
+                <li><a href="/console">Console</a></li>
                 <li><a href="/users">Users</a></li>
+                <li><a href="/tokens">API Tokens</a></li>
+                <li><a href="/firmware">Firmware</a></li>
                 <li><a href="/reset">Reset</a></li>
+                <li><a href="#" id="logout-link">Log out</a></li>
             </ul>
         </nav>
         <main class="content">
@@ -28,6 +33,18 @@
             <div class="row">
                 <div class="grid-2">
                     <form id="environment-form">
+                        <div class="form-row">
+                            <div class="form-label">
+                                <b>Primary Temperature Source</b>
+                            </div>
+                            <div class="form-input">
+                                <select id="primary_temp_source" name="primary_temp_source">
+                                    <option value="0">Onboard</option>
+                                    <option value="1">Header</option>
+                                </select>
+                            </div>
+                        </div>
+
                         <div class="form-row">
                             <div class="form-label">
                                 <b>Fan Control</b>
@@ -135,8 +152,24 @@
                     </form>
                 </div>
                 <div class="grid-2">
+                    <p class="heading">Current Temperatures</p>
+                    <table>
+                        <tr><th>Onboard</th><td id="temp-onboard">Loading...</td></tr>
+                        <tr><th>Header</th><td id="temp-header">Loading...</td></tr>
+                        <tr><th>RP2040 die</th><td id="temp-rp2040">Loading...</td></tr>
+                        <tr><th>Active source</th><td id="temp-active">Loading...</td></tr>
+                    </table>
                     <p class="heading">Legend</p>
                     <fieldset>
+                        <p><b>Primary Temperature Source</b> - Which probe drives fan control and
+                           the reported temperature: <b>Onboard</b> (built into the board) or
+                           <b>Header</b> (an optional probe on the pin header). Changes take effect
+                           immediately when saved &mdash; no reboot needed.</p>
+                        <p><b>Automatic fallback</b> - If the selected probe is missing or
+                           disconnected (e.g. no Header probe fitted, or it is unplugged), the
+                           system automatically falls back to the other probe, and finally to the
+                           RP2040 internal sensor, so fan control keeps running. The <b>Active
+                           source</b> row above shows which probe is actually in use.</p>
                         <p><b>Enable External Fan Control</b> - This option <b>disables</b> the automatic fan curve response and lets you set the fan speed manually.</p>
                         <p><b>Update Interval</b> - How often (in milliseconds) the fan control system checks the temperature and adjusts fan speed. Lower values provide more responsive control but use more CPU.</p>
                         <p><b>Hysteresis</b> - Temperature difference (as percentage of temperature span) required before changing fan speed. Helps prevent oscillation between fan speeds.</p>

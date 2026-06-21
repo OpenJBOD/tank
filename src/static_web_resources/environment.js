@@ -32,6 +32,9 @@ async function fetchEnvironmentSettings()
             const env = json.environment;
             currentEnvironmentSettings = JSON.parse(JSON.stringify(env));
             
+            // Temperature source preference
+            document.getElementById("primary_temp_source").value = String(env.primary_temp_source ?? 0);
+
             // Fan control settings
             document.getElementById("external_fan_control").checked = env.use_external_fan_control || false;
             document.getElementById("fan_update_interval").value = env.fan_update_interval_ms || 5000;
@@ -149,8 +152,11 @@ async function saveEnvironmentSettings(formData)
             }
         }
 
+        const primarySource = parseInt(formData.primary_temp_source, 10) === 1 ? 1 : 0;
+
         const settingsData = {
             environment: {
+                primary_temp_source: primarySource,
                 use_external_fan_control: externalFanControl,
                 fan_update_interval_ms: updateInterval,
                 fan_hysteresis_percent: hysteresis,
@@ -233,9 +239,46 @@ function validateTemperatureOrder() {
     return true;
 }
 
+function formatProbe(sensor) {
+    if (!sensor) {
+        return "n/a";
+    }
+    if (sensor.present === false) {
+        return "Not present";
+    }
+    if (!sensor.valid) {
+        return "No reading";
+    }
+    return `${sensor.temperature.toFixed(1)} °C`;
+}
+
+async function fetchTemperatures() {
+    try {
+        const response = await fetch("/api/temp", { cache: "no-store" });
+        if (!response.ok) {
+            throw new Error(`Response status: ${response.status}`);
+        }
+        const t = await response.json();
+        document.getElementById("temp-onboard").textContent = formatProbe(t.ds18b20);
+        document.getElementById("temp-header").textContent = formatProbe(t.ds18b20_ext);
+        document.getElementById("temp-rp2040").textContent = formatProbe(t.rp2040);
+
+        const active = t.active_source || "unknown";
+        const activeTemp = (typeof t.active_temperature === "number")
+            ? ` (${t.active_temperature.toFixed(1)} °C)` : "";
+        document.getElementById("temp-active").textContent = `${active}${activeTemp}`;
+    } catch (error) {
+        console.error("Failed to fetch temperatures:", error.message);
+    }
+}
+
 window.addEventListener("DOMContentLoaded", (ev) => {
     // Load current environment settings on page load
     fetchEnvironmentSettings();
+
+    // Live temperature readings
+    fetchTemperatures();
+    setInterval(fetchTemperatures, 3000);
     
     // Handle form submission
     const form = document.getElementById("environment-form");
@@ -249,6 +292,7 @@ window.addEventListener("DOMContentLoaded", (ev) => {
         
         const formData = new FormData(form);
         const settings = {
+            primary_temp_source: formData.get("primary_temp_source"),
             use_external_fan_control: formData.get("use_external_fan_control") === "on",
             fan_update_interval_ms: formData.get("fan_update_interval_ms"),
             fan_hysteresis_percent: formData.get("fan_hysteresis_percent"),

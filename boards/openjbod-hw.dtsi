@@ -1,0 +1,217 @@
+/*
+ * OpenJBOD Tank hardware description (everything except the flash partition
+ * table, which differs between the plain and MCUboot builds). Shared by
+ * boards/rpi_pico.overlay and boards/rpi_pico_rp2040_mcuboot.overlay.
+ *
+ * Board: OpenJBOD Rev5 Alpha2 pin configuration.
+ *   W5500: GPIO0 (RSTn), GPIO1 (INTn), GPIO2 (SCK), GPIO3 (MOSI), GPIO4 (MISO), GPIO5 (CSn)
+ *   I2C0:  GPIO8 (SDA), GPIO9 (SCL)
+ *   UART:  GPIO16 (TX), GPIO17 (RX)
+ */
+
+#include <zephyr/dt-bindings/pinctrl/rpi-pico-rp2040-pinctrl.h>
+
+&pinctrl {
+	/* Override UART0 pinmux for OpenJBOD UART pins */
+	uart0_openjbod: uart0_openjbod {
+		group1 {
+			pinmux = <UART0_TX_P16>;
+		};
+		group2 {
+			pinmux = <UART0_RX_P17>;
+			input-enable;
+		};
+	};
+
+	/* Override SPI0 pinmux for OpenJBOD W5500 pins */
+	spi0_openjbod: spi0_openjbod {
+		group1 {
+			pinmux = <SPI0_CSN_P5>, <SPI0_SCK_P2>, <SPI0_TX_P3>;
+		};
+		group2 {
+			pinmux = <SPI0_RX_P4>;
+			input-enable;
+		};
+	};
+
+	/* Override I2C0 pinmux for OpenJBOD EEPROM/EMC2301 */
+	i2c0_openjbod: i2c0_openjbod {
+		group1 {
+			pinmux = <I2C0_SDA_P8>, <I2C0_SCL_P9>;
+			input-enable;
+			input-schmitt-enable;
+			bias-pull-up;
+		};
+	};
+};
+
+&spi0 {
+	clock-frequency = <DT_FREQ_M(8)>;
+	status = "okay";
+	pinctrl-0 = <&spi0_openjbod>;
+	pinctrl-names = "default";
+	cs-gpios = <&gpio0 5 GPIO_ACTIVE_LOW>;
+
+	ethernet: w5500@0 {
+		compatible = "wiznet,w5500";
+		reg = <0x0>;
+		spi-max-frequency = <50000000>;
+		int-gpios = <&gpio0 1 GPIO_ACTIVE_LOW>;
+		reset-gpios = <&gpio0 0 GPIO_ACTIVE_LOW>;
+		status = "okay";
+	};
+};
+
+&uart0 {
+	current-speed = <115200>;
+	status = "okay";
+	pinctrl-0 = <&uart0_openjbod>;
+	pinctrl-names = "default";
+};
+
+&i2c0 {
+	clock-frequency = <I2C_BITRATE_STANDARD>;
+	status = "okay";
+	pinctrl-0 = <&i2c0_openjbod>;
+	pinctrl-names = "default";
+
+	/* Microchip 24AA025E EEPROM containing MAC address */
+	eeprom: eeprom@50 {
+		compatible = "atmel,at24";
+		reg = <0x50>;
+		size = <256>;
+		pagesize = <16>;
+		address-width = <8>;
+		timeout = <5>;
+		status = "okay";
+	};
+
+	/* EMC2301 Fan Controller */
+	emc2301: emc2301@2f {
+		compatible = "microchip,emc2301";
+		reg = <0x2f>;
+		status = "okay";
+	};
+};
+
+/ {
+	leds {
+		compatible = "gpio-leds";
+		led0: led_0 {
+			gpios = <&gpio0 6 GPIO_ACTIVE_HIGH>;
+			label = "OpenJBOD LED";
+		};
+	};
+
+	/* 1-Wire bus for DS18B20 temperature sensor on GPIO18 */
+	w1_0: w1-gpio {
+		compatible = "zephyr,w1-gpio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "okay";
+		gpios = <&gpio0 18 (GPIO_PULL_UP | GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+
+		ds18b20: ds18b20@0 {
+			compatible = "maxim,ds18b20";
+			reg = <0x0>;
+			family-code = <0x28>;
+			resolution = <9>;  /* 9-bit resolution for faster conversion */
+			status = "okay";
+		};
+	};
+
+	/* Second 1-Wire bus for the optional DS18B20 on the GPIO11 pin header.
+	 * The probe may or may not be physically present; it is detected at boot.
+	 */
+	w1_1: w1-gpio-ext {
+		compatible = "zephyr,w1-gpio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "okay";
+		gpios = <&gpio0 11 (GPIO_PULL_UP | GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+
+		ds18b20_ext: ds18b20@0 {
+			compatible = "maxim,ds18b20";
+			reg = <0x0>;
+			family-code = <0x28>;
+			resolution = <9>;  /* 9-bit resolution for faster conversion */
+			status = "okay";
+		};
+	};
+
+	/* GPIO nodes for power management */
+	gpio_keys {
+		compatible = "gpio-keys";
+		usb_sense: usb_sense {
+			gpios = <&gpio0 25 (GPIO_ACTIVE_HIGH)>;
+			label = "USB Sense";
+		};
+		power_button: power_button {
+			gpios = <&gpio0 12 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+			label = "Power Button";
+		};
+	};
+
+	/* RP2040 ROSC entropy source (out-of-tree driver) for the CSPRNG. */
+	rosc_rng: rosc-entropy {
+		compatible = "raspberrypi,pico-rosc-entropy";
+		status = "okay";
+	};
+
+	aliases {
+		led0 = &led0;
+		ds18b20 = &ds18b20;
+		ds18b20-ext = &ds18b20_ext;
+		emc2301 = &emc2301;
+		usb-sense = &usb_sense;
+		power-button = &power_button;
+	};
+
+	chosen {
+		zephyr,settings-partition = &storage_partition;
+		zephyr,entropy = &rosc_rng;
+	};
+
+	/* FATFS filesystem configuration for settings storage */
+	fstab {
+		compatible = "zephyr,fstab";
+		settings_fs: settings_fs {
+			compatible = "zephyr,fstab,fatfs";
+			mount-point = "/settings";
+			automount;
+			disk-access;
+		};
+	};
+
+	/* Flash disk driver using the settings partition */
+	flashdisk0 {
+		compatible = "zephyr,flash-disk";
+		partition = <&storage_partition>;
+		disk-name = "SETTINGS";
+		cache-size = <4096>;
+	};
+};
+
+/* Enable RP2040 onboard temperature sensor */
+&die_temp {
+	status = "okay";
+};
+
+/* Enable ADC for RP2040 temperature sensor */
+&adc {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+};
+
+/* USB CDC-ACM function for the secondary shell/console over USB.
+ * The board's USB device controller (zephyr_udc0) is already enabled in
+ * rpi_pico-common.dtsi. The hardware UART0 remains the primary chosen
+ * console/shell; this CDC-ACM device is an additional, independently
+ * initialized backend (see src/usb_console.c).
+ */
+&zephyr_udc0 {
+	cdc_acm_uart0: cdc_acm_uart0 {
+		compatible = "zephyr,cdc-acm-uart";
+	};
+};

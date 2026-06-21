@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenJBOD - Console</title>
+    <link rel="stylesheet" href="/style.css">
+    <script src="/console.js"></script>
+    <script src="/common.js"></script>
+</head>
+<body>
+    <div class="container">
+        <nav class="menu">
+            <ul>
+                <p class="menu-heading">OpenJBOD</p>
+                <li><a href="/">Overview</a></li>
+                <li><a href="/about">About</a></li>
+                <p class="menu-heading">Settings</p>
+                <li><a href="/network">Network</a></li>
+                <li><a href="/power">Power</a></li>
+                <li><a href="/http">HTTP</a></li>
+                <li><a href="/environment">Environment</a></li>
+                <li><a href="/console" class="active">Console</a></li>
+                <li><a href="/users">Users</a></li>
+                <li><a href="/tokens">API Tokens</a></li>
+                <li><a href="/firmware">Firmware</a></li>
+                <li><a href="/reset">Reset</a></li>
+                <li><a href="#" id="logout-link">Log out</a></li>
+            </ul>
+        </nav>
+        <main class="content">
+            <p class="heading">Settings - Console</p>
+            <div class="row">
+                <div class="grid-2">
+                    <form id="console-form">
+                        <div class="form-row">
+                            <div class="form-input">
+                                <label for="uart_enabled">
+                                    <input id="uart_enabled" type="checkbox" name="uart_enabled" />
+                                    Enable UART console
+                                </label>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-input">
+                                <label for="usb_enabled">
+                                    <input id="usb_enabled" type="checkbox" name="usb_enabled" />
+                                    Enable USB console (CDC-ACM)
+                                </label>
+                            </div>
+                        </div>
+                        <hr />
+                        <button type="submit">Save Console Settings</button>
+                        <p id="console-status"></p>
+                    </form>
+                </div>
+                <div class="grid-2">
+                    <p class="heading">Legend</p>
+                    <fieldset>
+                        <p>Both consoles run the same interactive shell and log output.</p>
+                        <p><b>Changes take effect on the next reboot</b>, not immediately.</p>
+                        <p><b>UART console</b> is the primary recovery console. Disabling it
+                           leaves only the USB console (and the network) to manage the device
+                           &mdash; do not disable both.</p>
+                        <p><b>USB console</b> enumerates this device as a USB serial port
+                           ("OpenJBOD Tank Console") when connected to a host.</p>
+                    </fieldset>
+                </div>
+            </div>
+        </main>
+    </div>
+</body>
+</html>

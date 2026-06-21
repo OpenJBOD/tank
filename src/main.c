@@ -34,6 +34,8 @@
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/sys/util_macro.h>
+#include <zephyr/shell/shell.h>
+#include <zephyr/shell/shell_uart.h>
 
 #include <ethernet/eth_stats.h>
 
@@ -43,9 +45,14 @@
 #include "emc2301.h"
 #include "fan_control.h"
 #include "http/server_control.h"
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
+#include "firmware_update.h"
+#endif
 #include "settings.h"
 #include "sr_latch.h"
+#include "status_led.h"
 #include "temperature.h"
+#include "usb_console.h"
 
 LOG_MODULE_REGISTER(tank, LOG_LEVEL_INF);
 
@@ -178,11 +185,24 @@ static void log_ipv6_address_event(struct net_if *iface,
 static void http_server_try_start(struct net_if *iface);
 static void on_boot_power_work_handler(struct k_work *work);
 
+#if defined(CONFIG_NET_HTTPS_SERVICE) && defined(CONFIG_NET_SOCKETS_SOCKOPT_TLS)
+static void add_tls_credential(enum tls_credential_type type, const void *data,
+			       size_t size, const char *label)
+{
+	int err = tls_credential_add(OPENJBOD_SERVER_CERTIFICATE_TAG, type, data, size);
+
+	if (err < 0) {
+		LOG_ERR("Failed to register %s: %d", label, err);
+	} else {
+		LOG_INF("Registered %s", label);
+	}
+}
+#endif
+
 static void setup_tls(void)
 {
 #if defined(CONFIG_NET_HTTPS_SERVICE)
 #if defined(CONFIG_NET_SOCKETS_SOCKOPT_TLS)
-	int err;
 	const struct openjbod_settings *settings = openjbod_settings_get();
 
 	static uint8_t custom_cert_data[CERTIFICATE_HEX_MAX_LEN / 2];
@@ -194,7 +214,9 @@ static void setup_tls(void)
 	if (settings->http.use_custom_certificates) {
 		LOG_INF("Attempting to load custom certificates from settings");
 
-		if (strlen(settings->http.custom_certificate) > 0 &&
+		if (settings->http.custom_certificate != NULL &&
+		    settings->http.custom_private_key != NULL &&
+		    strlen(settings->http.custom_certificate) > 0 &&
 		    strlen(settings->http.custom_private_key) > 0) {
 			int cert_result = convert_hex_to_binary(settings->http.custom_certificate,
 					       custom_cert_data,
@@ -219,44 +241,19 @@ static void setup_tls(void)
 	}
 
 	if (use_embedded_certs) {
-		err = tls_credential_add(OPENJBOD_SERVER_CERTIFICATE_TAG,
-					 TLS_CREDENTIAL_PUBLIC_CERTIFICATE,
-					 server_certificate,
-					 sizeof(server_certificate));
-		if (err < 0) {
-			LOG_ERR("Failed to register embedded certificate: %d", err);
-		} else {
-			LOG_INF("Registered embedded server certificate");
-		}
-
-		err = tls_credential_add(OPENJBOD_SERVER_CERTIFICATE_TAG,
-					 TLS_CREDENTIAL_PRIVATE_KEY,
-					 private_key, sizeof(private_key));
-		if (err < 0) {
-			LOG_ERR("Failed to register embedded private key: %d", err);
-		} else {
-			LOG_INF("Registered embedded private key");
-		}
+		add_tls_credential(TLS_CREDENTIAL_PUBLIC_CERTIFICATE,
+				   server_certificate, sizeof(server_certificate),
+				   "embedded server certificate");
+		add_tls_credential(TLS_CREDENTIAL_PRIVATE_KEY,
+				   private_key, sizeof(private_key),
+				   "embedded private key");
 	} else {
-		err = tls_credential_add(OPENJBOD_SERVER_CERTIFICATE_TAG,
-					 TLS_CREDENTIAL_PUBLIC_CERTIFICATE,
-					 custom_cert_data,
-					 custom_cert_size);
-		if (err < 0) {
-			LOG_ERR("Failed to register custom certificate: %d", err);
-		} else {
-			LOG_INF("Registered custom server certificate");
-		}
-
-		err = tls_credential_add(OPENJBOD_SERVER_CERTIFICATE_TAG,
-					 TLS_CREDENTIAL_PRIVATE_KEY,
-					 custom_key_data, custom_key_size);
-		if (err < 0) {
-			LOG_ERR("Failed to register custom private key: %d", err);
-		} else {
-			LOG_INF("Registered custom private key");
-		}
-
+		add_tls_credential(TLS_CREDENTIAL_PUBLIC_CERTIFICATE,
+				   custom_cert_data, custom_cert_size,
+				   "custom server certificate");
+		add_tls_credential(TLS_CREDENTIAL_PRIVATE_KEY,
+				   custom_key_data, custom_key_size,
+				   "custom private key");
 	}
 #endif /* defined(CONFIG_NET_SOCKETS_SOCKOPT_TLS) */
 #endif /* defined(CONFIG_NET_HTTPS_SERVICE) */
@@ -294,11 +291,22 @@ static void http_server_try_start(struct net_if *iface)
 	if (!settings->http.enable_http && !settings->http.enable_https) {
 		LOG_WRN("Both HTTP and HTTPS servers are disabled - no web interface available");
 		http_server_started = true;
+		/* An address is up even though no server is served. */
+		status_led_set(STATUS_LED_SOLID);
 		return;
 	}
 
 	restart_http_server();
 	http_server_started = true;
+	status_led_set(STATUS_LED_SOLID);
+
+	/* The web server is up = the device booted healthy. If we just swapped to a
+	 * pending (test) firmware image, confirm it now so MCUboot keeps it; an image
+	 * that hangs before reaching here never confirms and is reverted on reboot.
+	 */
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
+	firmware_update_mark_healthy();
+#endif
 
 	char ip_buf[INET_ADDRSTRLEN];
 	if (!net_addr_ntop(AF_INET, preferred_addr, ip_buf, sizeof(ip_buf))) {
@@ -330,30 +338,19 @@ static void net_event_handler(struct net_mgmt_event_callback *cb,
 	case NET_EVENT_IPV4_ADDR_DEL:
 	case NET_EVENT_IPV4_DHCP_STOP:
 		http_server_started = false;
+		/* Address lost - back to awaiting/blinking. */
+		status_led_set(STATUS_LED_AWAITING);
 		break;
-	case NET_EVENT_IPV6_ADDR_ADD: {
-		if (cb->info && cb->info_length == sizeof(struct in6_addr)) {
-			struct in6_addr added_addr;
-			struct net_if *addr_iface = iface;
-			const struct net_if_addr *ifaddr = NULL;
-
-			memcpy(&added_addr, cb->info, sizeof(added_addr));
-			ifaddr = net_if_ipv6_addr_lookup(&added_addr, &addr_iface);
-			log_ipv6_address_event(addr_iface, &added_addr, "assigned", ifaddr);
-		}
-		break;
-	}
+	case NET_EVENT_IPV6_ADDR_ADD:
 	case NET_EVENT_IPV6_DAD_SUCCEED: {
 		if (cb->info && cb->info_length == sizeof(struct in6_addr)) {
-			struct in6_addr ready_addr;
+			struct in6_addr addr;
 			struct net_if *addr_iface = iface;
 			const struct net_if_addr *ifaddr;
 
-			memcpy(&ready_addr, cb->info, sizeof(ready_addr));
-			ifaddr = net_if_ipv6_addr_lookup(&ready_addr, &addr_iface);
-			if (ifaddr) {
-				log_ipv6_address_event(addr_iface, &ready_addr, "assigned", ifaddr);
-			}
+			memcpy(&addr, cb->info, sizeof(addr));
+			ifaddr = net_if_ipv6_addr_lookup(&addr, &addr_iface);
+			log_ipv6_address_event(addr_iface, &addr, "assigned", ifaddr);
 		}
 		break;
 	}
@@ -692,6 +689,9 @@ static int init_networking(void)
 		return -ENODEV;
 	}
 
+	/* Bringing up the network - blink until an address yields a running server. */
+	status_led_set(STATUS_LED_AWAITING);
+
 	/* Set MAC address from EEPROM before starting DHCP */
 	ret = read_mac_address(mac_addr);
 	if (ret == 0) {
@@ -1002,6 +1002,35 @@ static int init_power_management(void)
 	return 0;
 }
 
+/* Apply persisted console settings: optionally bring up the USB CDC-ACM shell,
+ * and optionally silence the hardware UART shell. Call after settings load.
+ *
+ * Note: the boot banner and early-init logs are emitted on the UART before
+ * settings are available, so disabling the UART console only takes effect from
+ * here onward. The settings-reset route remains a recovery path.
+ */
+static void tank_console_apply_settings(void)
+{
+	const struct openjbod_settings *s = openjbod_settings_get();
+
+	if (s->console.usb_enabled) {
+		(void)tank_usb_console_init();  /* no-op stub if compiled out */
+	} else {
+		LOG_INF("USB console disabled by settings");
+	}
+
+#if defined(CONFIG_SHELL_BACKEND_SERIAL)
+	if (!s->console.uart_enabled) {
+		const struct shell *uart_sh = shell_backend_uart_get_ptr();
+
+		if (uart_sh != NULL) {
+			shell_stop(uart_sh);
+			LOG_INF("UART console disabled by settings");
+		}
+	}
+#endif
+}
+
 int main(void)
 {
 	int ret;
@@ -1036,6 +1065,12 @@ int main(void)
 		LOG_WRN("Settings load failed, using defaults: %d", ret);
 		/* Continue with default settings */
 	}
+
+	/* Apply console settings (USB CDC-ACM second shell, UART enable/disable). */
+	tank_console_apply_settings();
+
+	/* Status LED off at boot; init_networking() switches it to blinking. */
+	status_led_init();
 
 	init_networking();
 

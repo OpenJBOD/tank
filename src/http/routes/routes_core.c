@@ -1,5 +1,6 @@
 #include "http/routes/routes_core.h"
 
+#include <stdarg.h>
 #include <stdbool.h>
 #include <inttypes.h>
 #include <stdio.h>
@@ -7,7 +8,6 @@
 
 #include <zephyr/data/json.h>
 #include <zephyr/device.h>
-#include <zephyr/drivers/led.h>
 #include <zephyr/kernel.h>
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/net_ip.h>
@@ -21,6 +21,7 @@
 #include "http/auth.h"
 #include "settings.h"
 #include "sr_latch.h"
+#include "status_led.h"
 #include "temperature.h"
 
 LOG_MODULE_REGISTER(tank_http_core, LOG_LEVEL_INF);
@@ -28,17 +29,14 @@ LOG_MODULE_REGISTER(tank_http_core, LOG_LEVEL_INF);
 #define DEVICE_INFO_JSON_BUF_SIZE 512
 #define STATUS_JSON_BUF_SIZE 1024
 
-struct led_command {
-	int led_num;
-	bool led_state;
+/* POST /api/led now controls the locator beacon: {"beacon": true|false}. */
+struct beacon_command {
+	bool beacon;
 };
 
-static const struct json_obj_descr led_command_descr[] = {
-	JSON_OBJ_DESCR_PRIM(struct led_command, led_num, JSON_TOK_NUMBER),
-	JSON_OBJ_DESCR_PRIM(struct led_command, led_state, JSON_TOK_TRUE),
+static const struct json_obj_descr beacon_command_descr[] = {
+	JSON_OBJ_DESCR_PRIM(struct beacon_command, beacon, JSON_TOK_TRUE),
 };
-
-static const struct device *leds_dev = DEVICE_DT_GET_ANY(gpio_leds);
 
 static void copy_with_fallback(char *dest, size_t dest_len, const char *fallback)
 {
@@ -229,55 +227,18 @@ static void build_ipv6_address_json(struct net_if *iface,
 static void parse_led_post(uint8_t *buf, size_t len)
 {
 	int ret;
-	struct led_command cmd;
-	const int expected_return_code = BIT_MASK(ARRAY_SIZE(led_command_descr));
+	struct beacon_command cmd;
+	const int expected_return_code = BIT_MASK(ARRAY_SIZE(beacon_command_descr));
 
-	ret = json_obj_parse(buf, len, led_command_descr,
-			       ARRAY_SIZE(led_command_descr), &cmd);
+	ret = json_obj_parse(buf, len, beacon_command_descr,
+			       ARRAY_SIZE(beacon_command_descr), &cmd);
 	if (ret != expected_return_code) {
-		LOG_WRN("Failed to fully parse JSON payload, ret=%d", ret);
+		LOG_WRN("Failed to parse beacon payload, ret=%d", ret);
 		return;
 	}
 
-	LOG_INF("POST request setting LED %d to state %d", cmd.led_num, cmd.led_state);
-
-	if (leds_dev != NULL) {
-		if (cmd.led_state) {
-			led_on(leds_dev, cmd.led_num);
-		} else {
-			led_off(leds_dev, cmd.led_num);
-		}
-	}
-}
-
-static int uptime_handler(struct http_client_ctx *client, enum http_data_status status,
-			  const struct http_request_ctx *request_ctx,
-			  struct http_response_ctx *response_ctx,
-			  void *user_data)
-{
-	int ret;
-	static uint8_t uptime_buf[sizeof(STRINGIFY(INT64_MAX))];
-
-	ARG_UNUSED(client);
-	ARG_UNUSED(request_ctx);
-	ARG_UNUSED(user_data);
-
-	/* A payload is not expected with the GET request. Ignore any data and wait until
-	 * final callback before sending response
-	 */
-	if (status == HTTP_SERVER_DATA_FINAL) {
-		ret = snprintf(uptime_buf, sizeof(uptime_buf), "%" PRId64, k_uptime_get());
-		if (ret < 0) {
-			LOG_ERR("Failed to snprintf uptime, err %d", ret);
-			return ret;
-		}
-
-		response_ctx->body = uptime_buf;
-		response_ctx->body_len = ret;
-		response_ctx->final_chunk = true;
-	}
-
-	return 0;
+	LOG_INF("POST request setting locator beacon to %d", cmd.beacon);
+	status_led_set_beacon(cmd.beacon);
 }
 
 static int device_info_handler(struct http_client_ctx *client, enum http_data_status status,
@@ -293,11 +254,16 @@ static int device_info_handler(struct http_client_ctx *client, enum http_data_st
 	static char gateway_buf[INET_ADDRSTRLEN];
 	static char mac_buf[18];
 
-	ARG_UNUSED(client);
 	ARG_UNUSED(request_ctx);
 	ARG_UNUSED(user_data);
 
 	if (status == HTTP_SERVER_DATA_FINAL) {
+		if (http_check_auth(client) != 0) {
+			LOG_WRN("Authentication failed for device_info endpoint");
+			http_send_auth_required_response(response_ctx);
+			return 0;
+		}
+
 		struct net_if *iface = net_if_get_default();
 
 		fetch_device_identity(serial_buf, sizeof(serial_buf),
@@ -313,6 +279,8 @@ static int device_info_handler(struct http_client_ctx *client, enum http_data_st
 			 "{"
 			 "\"serial\":\"%s\","\
 			 "\"version\":\"%s\","\
+			 "\"firmware_version\":\"%s\","\
+			 "\"bootloader_version\":%d,"\
 			 "\"board_revision\":\"%s\","\
 			 "\"ip_address\":\"%s\","\
 			 "\"subnet_mask\":\"%s\","\
@@ -321,6 +289,8 @@ static int device_info_handler(struct http_client_ctx *client, enum http_data_st
 			 "}",
 			 serial_buf,
 			 version ? version : "Unknown",
+			 OPENJBOD_VERSION_STRING,
+			 OPENJBOD_BOOTLOADER_VER,
 			 board_rev_buf,
 			 ip_buf,
 			 subnet_buf,
@@ -359,7 +329,7 @@ static int led_handler(struct http_client_ctx *client, enum http_data_status sta
 	LOG_DBG("LED handler status %d, size %zu", status, request_ctx->data_len);
 
 	if (status == HTTP_SERVER_DATA_FINAL) {
-		int auth_result = http_basic_auth_check(client);
+		int auth_result = http_check_auth(client);
 		if (auth_result != 0) {
 			LOG_WRN("Authentication failed for LED endpoint");
 			http_send_auth_required_response(response_ctx);
@@ -404,6 +374,27 @@ static const char *ipv6_mode_to_string(enum ipv6_mode mode)
 	}
 }
 
+/* Append a formatted JSON fragment at *off, advancing it. Size-safe: never writes
+ * past cap, and *off ends up as the would-be total length so callers can detect
+ * truncation (off >= cap). Lets /api/status be built one readable section at a time
+ * instead of one snprintf with ~30 positional args. */
+static void json_appendf(char *buf, size_t cap, size_t *off, const char *fmt, ...)
+{
+	if (*off >= cap) {
+		return;
+	}
+
+	va_list ap;
+
+	va_start(ap, fmt);
+	int w = vsnprintf(buf + *off, cap - *off, fmt, ap);
+
+	va_end(ap);
+	if (w > 0) {
+		*off += (size_t)w;
+	}
+}
+
 static int status_handler(struct http_client_ctx *client, enum http_data_status status,
 			 const struct http_request_ctx *request_ctx,
 			 struct http_response_ctx *response_ctx,
@@ -417,7 +408,7 @@ static int status_handler(struct http_client_ctx *client, enum http_data_status 
 	ARG_UNUSED(user_data);
 
 	if (status == HTTP_SERVER_DATA_FINAL) {
-		int auth_result = http_basic_auth_check(client);
+		int auth_result = http_check_auth(client);
 		if (auth_result != 0) {
 			LOG_WRN("Authentication failed for status endpoint");
 			http_send_auth_required_response(response_ctx);
@@ -442,7 +433,10 @@ static int status_handler(struct http_client_ctx *client, enum http_data_status 
 	LOG_DBG("Status handler status %d", status);
 
 	if (status == HTTP_SERVER_DATA_FINAL) {
-		ret = temperature_read(&temp_data);
+		/* Cached read: avoids the ~750ms blocking DS18B20 conversion on the HTTP
+		 * thread (the fan-control thread keeps the cache warm).
+		 */
+		ret = temperature_read_cached(&temp_data);
 		bool temp_valid = (ret == 0);
 
 		ret = emc2301_get_status(&fan_data);
@@ -466,77 +460,68 @@ static int status_handler(struct http_client_ctx *client, enum http_data_status 
 		build_ipv6_address_json(iface, ipv6_json, sizeof(ipv6_json));
 
 		const char *build_info = openjbod_device_info_get_build_info();
-		int written = snprintf(response_buffer, sizeof(response_buffer),
-			 "{"
-			 "\"status\":\"success\","\
-			 "\"temperature\":{"
-			 "\"valid\":%s,"\
-			 "\"ds18b20\":{"
-			 "\"temperature\":%.3f,"\
-			 "\"valid\":%s"
-			 "},"\
-			 "\"rp2040\":{"
-			 "\"temperature\":%.3f,"\
-			 "\"valid\":%s"
-			 "}"
-			 "},"\
-			 "\"fan\":{"
-			 "\"valid\":%s,"\
-			 "\"rpm\":%d,"\
-			 "\"speed_percent\":%d,"\
-			 "\"fault\":%s"
-			 "},"\
-			 "\"device\":{"
-			 "\"serial\":\"%s\","\
-			 "\"version\":\"%s\","\
-			 "\"board_revision\":\"%s\","\
-			 "\"hostname\":\"%s\""
-			 "},"\
-			 "\"network\":{"
-			 "\"mac_address\":\"%s\","\
-			 "\"ip_address\":\"%s\","\
-			 "\"subnet_mask\":\"%s\","\
-			 "\"gateway\":\"%s\","\
-			"\"ip_method\":\"%s\","\
-			"\"ipv6_mode\":\"%s\","\
-			 "\"ipv6_addresses\":%s"
-			 "},"\
-			 "\"power\":{"
-			 "\"state\":\"%s\""
-			 "}"
-			 "}",
-			 temp_valid ? "true" : "false",
-			 (double)temp_data.ds18b20_temp,
-			 temp_data.ds18b20_valid ? "true" : "false",
-			 (double)temp_data.rp2040_temp,
-			 temp_data.rp2040_valid ? "true" : "false",
-			 fan_valid ? "true" : "false",
-			 fan_valid ? fan_data.fan_rpm : 0,
-			 fan_valid ? emc2301_duty_to_percent(fan_data.pwm_duty) : 0,
-			 (fan_valid && fan_data.fan_fault) ? "true" : "false",
-			 serial_buffer,
-			 build_info ? build_info : "Unknown",
-			 board_rev_buffer,
-			 settings->network.hostname,
-			 mac_str,
-			 ip_str,
-			 subnet_str,
-			 gateway_str,
-			 ip_method_str,
-			 ipv6_mode_str,
-			 ipv6_json,
-			 power_state_str);
 
-		if (written < 0) {
-			LOG_ERR("Failed to format status response");
-			return written;
+		float active_temp = 0.0f;
+		const char *active_src = "none";
+		if (temp_valid) {
+			(void)temperature_get_active(&temp_data,
+						     settings->environment.primary_temp_source,
+						     &active_temp, &active_src);
 		}
 
-		if (written >= (int)sizeof(response_buffer)) {
+		size_t off = 0;
+
+		json_appendf(response_buffer, sizeof(response_buffer), &off,
+			"{\"status\":\"success\",\"uptime\":%lld,", (long long)k_uptime_get());
+
+		json_appendf(response_buffer, sizeof(response_buffer), &off,
+			"\"temperature\":{"
+			"\"valid\":%s,"
+			"\"active_source\":\"%s\","
+			"\"ds18b20\":{\"temperature\":%.3f,\"valid\":%s},"
+			"\"ds18b20_ext\":{\"temperature\":%.3f,\"valid\":%s,\"present\":%s},"
+			"\"rp2040\":{\"temperature\":%.3f,\"valid\":%s}},",
+			temp_valid ? "true" : "false", active_src,
+			(double)temp_data.ds18b20_temp, temp_data.ds18b20_valid ? "true" : "false",
+			(double)temp_data.ds18b20_ext_temp, temp_data.ds18b20_ext_valid ? "true" : "false",
+			temperature_ext_present() ? "true" : "false",
+			(double)temp_data.rp2040_temp, temp_data.rp2040_valid ? "true" : "false");
+
+		json_appendf(response_buffer, sizeof(response_buffer), &off,
+			"\"fan\":{\"valid\":%s,\"rpm\":%d,\"speed_percent\":%d,\"fault\":%s},",
+			fan_valid ? "true" : "false",
+			fan_valid ? fan_data.fan_rpm : 0,
+			fan_valid ? emc2301_duty_to_percent(fan_data.pwm_duty) : 0,
+			(fan_valid && fan_data.fan_fault) ? "true" : "false");
+
+		json_appendf(response_buffer, sizeof(response_buffer), &off,
+			"\"device\":{\"serial\":\"%s\",\"version\":\"%s\","
+			"\"board_revision\":\"%s\",\"hostname\":\"%s\"},",
+			serial_buffer, build_info ? build_info : "Unknown",
+			board_rev_buffer, settings->network.hostname);
+
+		json_appendf(response_buffer, sizeof(response_buffer), &off,
+			"\"network\":{\"mac_address\":\"%s\",\"ip_address\":\"%s\","
+			"\"subnet_mask\":\"%s\",\"gateway\":\"%s\","
+			"\"ip_method\":\"%s\",\"ipv6_mode\":\"%s\",\"ipv6_addresses\":%s},",
+			mac_str, ip_str, subnet_str, gateway_str,
+			ip_method_str, ipv6_mode_str, ipv6_json);
+
+		json_appendf(response_buffer, sizeof(response_buffer), &off,
+			"\"power\":{\"state\":\"%s\",\"on_boot\":%s,\"on_boot_delay\":%u,"
+			"\"follow_usb\":%s,\"follow_usb_delay\":%u},",
+			power_state_str,
+			settings->power.on_boot ? "true" : "false", settings->power.on_boot_delay,
+			settings->power.follow_usb ? "true" : "false", settings->power.follow_usb_delay);
+
+		json_appendf(response_buffer, sizeof(response_buffer), &off,
+			"\"beacon\":%s}", status_led_beacon_active() ? "true" : "false");
+
+		if (off >= sizeof(response_buffer)) {
 			LOG_WRN("Status response truncated to %zu bytes", sizeof(response_buffer) - 1);
 			response_ctx->body_len = sizeof(response_buffer) - 1;
 		} else {
-			response_ctx->body_len = (size_t)written;
+			response_ctx->body_len = off;
 		}
 
 		response_ctx->body = response_buffer;
@@ -545,15 +530,6 @@ static int status_handler(struct http_client_ctx *client, enum http_data_status 
 
 	return 0;
 }
-
-struct http_resource_detail_dynamic uptime_resource_detail = {
-	.common = {
-		.type = HTTP_RESOURCE_TYPE_DYNAMIC,
-		.bitmask_of_supported_http_methods = BIT(HTTP_GET),
-	},
-	.cb = uptime_handler,
-	.user_data = NULL,
-};
 
 struct http_resource_detail_dynamic device_info_resource_detail = {
 	.common = {

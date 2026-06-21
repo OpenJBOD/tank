@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenJBOD - Sign in</title>
+    <link rel="stylesheet" href="/style.css">
+    <script src="/login.js"></script>
+</head>
+<body>
+    <div class="container">
+        <main class="content">
+            <p class="heading">OpenJBOD</p>
+            <div class="row">
+                <div class="grid-2">
+                    <p class="heading" id="login-heading">Sign in</p>
+                    <form id="login-form">
+                        <div class="form-row">
+                            <div class="form-label"><b>Username</b></div>
+                            <div class="form-input">
+                                <input id="username" name="username" type="text"
+                                       autocomplete="username" autofocus required />
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-label"><b>Password</b></div>
+                            <div class="form-input">
+                                <input id="password" name="password" type="password"
+                                       autocomplete="current-password" required />
+                            </div>
+                        </div>
+                        <hr />
+                        <button type="submit">Sign in</button>
+                        <p id="login-status"></p>
+                    </form>
+                </div>
+            </div>
+        </main>
+    </div>
+</body>
+</html>

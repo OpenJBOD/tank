@@ -1,0 +1,9 @@
+/*
+ * OpenJBOD board overlay for the MCUboot (firmware-upgrade) build, board
+ * `rpi_pico/rp2040/mcuboot`. Full Tank hardware + the OpenJBOD 16 MB A/B
+ * partition layout. The board itself points zephyr,code-partition at
+ * slot0_partition (correct for the application).
+ */
+
+#include "openjbod-hw.dtsi"
+#include "openjbod-partitions-mcuboot.dtsi"

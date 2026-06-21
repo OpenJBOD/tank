@@ -15,11 +15,20 @@ extern "C" {
 #endif
 
 /* SEMVER version - update as needed */
-#define OPENJBOD_VERSION_MAJOR 0
-#define OPENJBOD_VERSION_MINOR 9
-#define OPENJBOD_VERSION_PATCH 9
+#define OPENJBOD_VERSION_MAJOR 1
+#define OPENJBOD_VERSION_MINOR 0
+#define OPENJBOD_VERSION_PATCH 0
 
-#define OPENJBOD_VERSION_STRING "0.9.9"
+#define OPENJBOD_VERSION_STRING "1.0.0"
+
+/* MCUboot bootloader revision. Not semver - just a counter bumped whenever the
+ * bootloader is changed (rare). It is reported by the application; since the
+ * bootloader and app are built and flashed together (the "full" image), this
+ * reflects the bootloader the running app was built against. Bumping it implies
+ * shipping a new full image - a board must be re-flashed over BOOTSEL to pick up
+ * a new bootloader (a DFU app-only update never replaces it).
+ */
+#define OPENJBOD_BOOTLOADER_VER 1
 
 /* Maximum serial number string length (16 hex chars + null terminator) */
 #define OPENJBOD_SERIAL_MAX_LEN 17

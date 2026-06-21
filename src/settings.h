@@ -18,6 +18,12 @@ extern "C" {
 #define IP_ADDR_MAX_LEN 16
 #define IPV6_ADDR_MAX_LEN 46
 #define USERNAME_MAX_LEN 32
+#define USERNAME_MAX_CHARS (USERNAME_MAX_LEN - 1)  /* usable chars (buffer holds NUL) */
+/* Plaintext password policy (the password itself is only ever stored hashed). The
+ * max is kept well under the login/create JSON buffers so a password can never be
+ * "settable but un-loginable". */
+#define PASSWORD_MIN_LEN 8
+#define PASSWORD_MAX_LEN 64
 #define PASSWORD_HASH_LEN 64
 #define SALT_LEN 16
 #define SALT_STR_LEN (SALT_LEN * 2 + 1)  /* Hex string length */
@@ -75,8 +81,12 @@ struct http_settings {
 	uint16_t http_port;
 	uint16_t https_port;
 	bool use_custom_certificates;
-	char custom_certificate[CERTIFICATE_HEX_MAX_LEN];
-	char custom_private_key[PRIVATE_KEY_HEX_MAX_LEN];
+	/* Heap-allocated hex strings, NULL when unset. Kept out of the struct (and
+	 * thus out of always-resident RAM) since custom certs are the exception;
+	 * CERTIFICATE_HEX_MAX_LEN / PRIVATE_KEY_HEX_MAX_LEN remain the size caps.
+	 */
+	char *custom_certificate;
+	char *custom_private_key;
 };
 
 /* Fan curve point structure */
@@ -85,11 +95,24 @@ struct fan_curve_point {
 	uint8_t fan_percent; /* Fan speed percentage (0-100) */
 };
 
+/* Primary temperature source selection (for fan control / reporting). */
+enum temp_source {
+	TEMP_SRC_ONBOARD = 0,  /* Onboard DS18B20 on GPIO18 */
+	TEMP_SRC_HEADER  = 1,  /* External DS18B20 on the GPIO11 pin header */
+};
+
 struct environment_settings {
 	bool use_external_fan_control;    /* If true, disable automatic fan control */
 	uint32_t fan_update_interval_ms;  /* Fan control update interval in milliseconds */
 	uint8_t fan_hysteresis_percent;   /* Hysteresis to prevent oscillation */
+	uint8_t primary_temp_source;      /* enum temp_source: preferred probe */
 	struct fan_curve_point fan_curve[5]; /* 5-point fan curve */
+};
+
+/* Console (shell) backend enable flags. Both default true. */
+struct console_settings {
+	bool uart_enabled;  /* Hardware UART0 shell/console (pin header) */
+	bool usb_enabled;   /* USB CDC-ACM shell/console */
 };
 
 struct openjbod_settings {
@@ -98,6 +121,7 @@ struct openjbod_settings {
 	struct auth_settings auth;
 	struct http_settings http;
 	struct environment_settings environment;
+	struct console_settings console;
 };
 
 int openjbod_settings_init(void);
@@ -108,7 +132,13 @@ int openjbod_settings_set_network(const struct network_settings *net);
 int openjbod_settings_set_power(const struct power_settings *power);
 int openjbod_settings_set_auth(const struct auth_settings *auth);
 int openjbod_settings_set_http(const struct http_settings *http);
+/* Set the optional custom TLS certificate/private key (hex strings). Takes
+ * ownership of the heap-allocated argument (or NULL to clear); frees the previous
+ * value. Call openjbod_settings_save_all() afterwards to persist. */
+void openjbod_settings_take_custom_certificate(char *hex_or_null);
+void openjbod_settings_take_custom_private_key(char *hex_or_null);
 int openjbod_settings_set_environment(const struct environment_settings *environment);
+int openjbod_settings_set_console(const struct console_settings *console);
 int openjbod_settings_save_user(int user_idx, const struct user_entry *user);
 int openjbod_settings_delete_user(int user_idx);
 int openjbod_settings_create_user(const char *username, const char *password);

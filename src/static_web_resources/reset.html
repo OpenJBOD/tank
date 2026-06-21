@@ -6,6 +6,7 @@
     <title>OpenJBOD - Reset</title>
     <link rel="stylesheet" href="/style.css">
     <script src="/reset.js"></script>
+    <script src="/common.js"></script>
 </head>
 <body>
     <div class="container">
@@ -19,8 +20,12 @@
                 <li><a href="/power">Power</a></li>
                 <li><a href="/http">HTTP</a></li>
                 <li><a href="/environment">Environment</a></li>
+                <li><a href="/console">Console</a></li>
                 <li><a href="/users">Users</a></li>
+                <li><a href="/tokens">API Tokens</a></li>
+                <li><a href="/firmware">Firmware</a></li>
                 <li><a href="/reset" class="active">Reset</a></li>
+                <li><a href="#" id="logout-link">Log out</a></li>
             </ul>
         </nav>
         <main class="content">
@@ -35,6 +40,21 @@
                     <p class="heading">Factory Reset</p>
                     <p>Erases all persisted settings, restores defaults, and then restarts the controller.</p>
                     <button id="reset-config">Reset Configuration &amp; Reboot</button>
+                </div>
+            </div>
+            <div class="row">
+                <div class="grid-2">
+                    <p class="heading">Backup Configuration</p>
+                    <p>Download the current configuration (<code>settings.dat</code>) to your computer
+                       so you can restore it later or copy it to another board.</p>
+                    <button id="backup-download">Download Backup</button>
+                </div>
+                <div class="grid-2">
+                    <p class="heading">Restore Configuration</p>
+                    <p>Upload a previously downloaded <code>settings.dat</code>. The device overwrites
+                       its configuration with the file and then reboots to apply it.</p>
+                    <input type="file" id="restore-file" accept=".dat,application/octet-stream" />
+                    <button id="restore-upload">Restore &amp; Reboot</button>
                 </div>
             </div>
             <p id="reset-status"></p>

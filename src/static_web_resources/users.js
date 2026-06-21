@@ -230,12 +230,17 @@ function validateAddUserForm(formData) {
         showStatusMessage("Password is required.", true);
         return false;
     }
-    
+
+    if (formData.password.length < 8 || formData.password.length > 64) {
+        showStatusMessage("Password must be 8-64 characters.", true);
+        return false;
+    }
+
     if (formData.password !== formData.confirm_password) {
         showStatusMessage("Passwords do not match.", true);
         return false;
     }
-    
+
     return true;
 }
 
@@ -249,12 +254,17 @@ function validateChangePasswordForm(formData) {
         showStatusMessage("New password is required.", true);
         return false;
     }
-    
+
+    if (formData.password.length < 8 || formData.password.length > 64) {
+        showStatusMessage("Password must be 8-64 characters.", true);
+        return false;
+    }
+
     if (formData.password !== formData.confirm_password) {
         showStatusMessage("Passwords do not match.", true);
         return false;
     }
-    
+
     return true;
 }
 

@@ -1,0 +1,11 @@
+# Copyright (c) 2025 The OpenJBOD Project
+# SPDX-License-Identifier: Apache-2.0
+
+description: |
+  RP2040 ring-oscillator (ROSC) entropy source. Samples the ROSC RANDOMBIT
+  register to provide hardware entropy for Zephyr's CSPRNG. No reg property is
+  needed; the driver accesses the fixed ROSC block via the Pico SDK.
+
+compatible: "raspberrypi,pico-rosc-entropy"
+
+include: base.yaml

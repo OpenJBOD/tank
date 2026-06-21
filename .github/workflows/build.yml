@@ -12,9 +12,7 @@ permissions:
 
 jobs:
   build:
-    name: Build app and tests
-    strategy:
-      fail-fast: false
+    name: Build firmware (MCUboot + DFU)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -52,24 +50,78 @@ jobs:
           toolchains: arm-zephyr-eabi
           ccache-cache-key: ubuntu-latest
 
-      - name: Build firmware
+      - name: Install image-signing tools
+        # The sysbuild + MCUboot build signs the app with imgtool, which needs
+        # cryptography/cbor2/intelhex available to Python.
+        run: pip install imgtool
+
+      - name: Provision MCUboot signing key
+        id: signkey
+        shell: bash
+        env:
+          MCUBOOT_SIGNING_KEY: ${{ secrets.MCUBOOT_SIGNING_KEY }}
+        run: |
+          if [ -n "$MCUBOOT_SIGNING_KEY" ]; then
+            install -m 600 /dev/null "$RUNNER_TEMP/mcuboot-key.pem"
+            printf '%s\n' "$MCUBOOT_SIGNING_KEY" > "$RUNNER_TEMP/mcuboot-key.pem"
+            echo "key=$RUNNER_TEMP/mcuboot-key.pem" >> "$GITHUB_OUTPUT"
+            echo "Signing with the MCUBOOT_SIGNING_KEY secret."
+          else
+            echo "key=" >> "$GITHUB_OUTPUT"
+            echo "::warning::MCUBOOT_SIGNING_KEY secret is not set; building with MCUboot's bundled dev key (not for production / not interchangeable with secret-signed images)."
+          fi
+
+      - name: Build firmware (sysbuild + MCUboot)
         working-directory: tank
         shell: bash
-        run: west build -s . -b rpi_pico
+        run: |
+          set -euo pipefail
+          EXTRA=()
+          if [ -n "${{ steps.signkey.outputs.key }}" ]; then
+            EXTRA=(-DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE="\"${{ steps.signkey.outputs.key }}\"")
+          fi
+          west build -s . -b rpi_pico/rp2040/mcuboot --sysbuild -- "${EXTRA[@]}"
 
-      - name: Upload build artifact
+      - name: Package images
+        working-directory: tank
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "release" ]; then
+            REF="${{ github.event.release.tag_name }}"
+          else
+            REF="$(git rev-parse --short HEAD)"
+          fi
+
+          MCUBOOT_UF2="$(find build -path '*/mcuboot/zephyr/zephyr.uf2' | head -1)"
+          SIGNED_HEX="$(find build -path '*/zephyr/zephyr.signed.hex' | head -1)"
+          SIGNED_BIN="$(find build -path '*/zephyr/zephyr.signed.bin' | head -1)"
+          [ -n "$MCUBOOT_UF2" ] && [ -n "$SIGNED_HEX" ] && [ -n "$SIGNED_BIN" ] \
+            || { echo "missing build artifacts"; exit 1; }
+
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+
+          # DFU upgrade image: the signed app, uploaded via POST /api/firmware.
+          cp "$SIGNED_BIN" "$GITHUB_WORKSPACE/artifacts/tank-${REF}-update.bin"
+
+          # Full image: bootloader + signed app as one BOOTSEL-flashable UF2.
+          # (The app's own zephyr.uf2 is unusable on RP2040; build it from the
+          #  signed hex and concatenate it after the bootloader UF2.)
+          python ../zephyr/scripts/build/uf2conv.py "$SIGNED_HEX" -f RP2040 -c -o "$RUNNER_TEMP/app.uf2"
+          cat "$MCUBOOT_UF2" "$RUNNER_TEMP/app.uf2" > "$GITHUB_WORKSPACE/artifacts/tank-${REF}-full.uf2"
+
+          ls -l "$GITHUB_WORKSPACE/artifacts"
+
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: zephyr
-          path: tank/build/zephyr/zephyr.uf2
+          name: tank-firmware
+          path: artifacts/*
 
-      - name: Upload release asset
+      - name: Attach images to release
         if: github.event_name == 'release'
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: softprops/action-gh-release@v2
         with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: tank/build/zephyr/zephyr.uf2
-          asset_name: tank-${{ github.event.release.tag_name }}.uf2
-          asset_content_type: application/octet-stream
+          files: |
+            artifacts/tank-*-full.uf2
+            artifacts/tank-*-update.bin

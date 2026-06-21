@@ -4,3 +4,5 @@
 
 extern struct http_resource_detail_dynamic reset_device_resource_detail;
 extern struct http_resource_detail_dynamic reset_config_resource_detail;
+extern struct http_resource_detail_dynamic settings_backup_resource_detail;
+extern struct http_resource_detail_dynamic settings_restore_resource_detail;

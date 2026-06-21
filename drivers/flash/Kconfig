@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
+
+config FLASH_RPI_PICO_FIXED
+	bool "OpenJBOD RP2040 flash driver (sub-page write fix)"
+	default n
+	depends on DT_HAS_RASPBERRYPI_PICO_FLASH_CONTROLLER_ENABLED
+	depends on !FLASH_RPI_PICO
+	select FLASH_HAS_DRIVER_ENABLED
+	select FLASH_HAS_PAGE_LAYOUT
+	select FLASH_HAS_EXPLICIT_ERASE
+	select PICOSDK_USE_FLASH
+	help
+	  Drop-in replacement for the in-tree FLASH_RPI_PICO driver. The Pico SDK's
+	  flash_write_partial() (sub-page program via direct SSI bit-bang) silently
+	  fails on the OpenJBOD W25Q128, so MCUboot image-trailer and settings/NVS
+	  sub-page writes never reach the chip ("could not set the boot bit"). This
+	  driver performs sub-page writes as a read-modify-write of the containing
+	  256-byte page via the working bootrom flash_range_program().
+
+	  To use: set CONFIG_FLASH_RPI_PICO=n and CONFIG_FLASH_RPI_PICO_FIXED=y.
+	  Must be enabled for every image that writes flash - the application and,
+	  when MCUboot is built via sysbuild, the mcuboot image (sysbuild/mcuboot.conf).

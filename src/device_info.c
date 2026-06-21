@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "device_info.h"
+#include "eeprom_mac.h"
 
 LOG_MODULE_REGISTER(device_info, LOG_LEVEL_INF);
 
@@ -91,6 +92,7 @@ int openjbod_device_info_init(void)
 
 	LOG_INF("Device serial number: %s", cached_serial);
 	LOG_INF("Firmware version: %s", OPENJBOD_VERSION_STRING);
+	LOG_INF("Bootloader version: %d", OPENJBOD_BOOTLOADER_VER);
 	LOG_INF("Build info: %s", build_info_string);
 	LOG_INF("Board revision: %s", cached_board_revision);
 
@@ -138,24 +140,6 @@ void openjbod_device_info_get_version_components(uint8_t *major, uint8_t *minor,
 	if (patch) *patch = OPENJBOD_VERSION_PATCH;
 }
 
-/**
- * Check if EEPROM/MACROM is present on I2C bus
- * Returns true if device responds to its address
- */
-static bool macrom_is_present(void)
-{
-	uint8_t dummy_data;
-	int ret;
-
-	if (!device_is_ready(i2c_dev)) {
-		return false;
-	}
-
-	/* Try a simple read to see if device ACKs its address */
-	ret = i2c_read(i2c_dev, &dummy_data, 1, EEPROM_I2C_ADDR);
-	return (ret == 0);
-}
-
 static int openjbod_device_info_get_board_revision_uncached(char *board_rev_buf, size_t buf_len)
 {
 	uint8_t version_byte = 0xFF;
@@ -166,7 +150,7 @@ static int openjbod_device_info_get_board_revision_uncached(char *board_rev_buf,
 	}
 
 	/* Check if MACROM is present on I2C bus */
-	if (!macrom_is_present()) {
+	if (!eeprom_24aa025e_present(i2c_dev)) {
 		LOG_INF("No MACROM detected - presuming Rev 4 board");
 		strncpy(board_rev_buf, "Rev 4", buf_len - 1);
 		board_rev_buf[buf_len - 1] = '\0';

@@ -13,3 +13,4 @@ manifest:
           - mbedtls
           - cmsis_6
           - fatfs
+          - mcuboot

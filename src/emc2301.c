@@ -19,65 +19,50 @@ static const struct device *i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c0));
 /* Driver data */
 static struct emc2301_data emc_data = {0};
 
+#define EMC2301_I2C_RETRIES     3
+#define EMC2301_I2C_RETRY_MS    10
+
 /**
- * Read a single byte from EMC2301 register
+ * Read or write a single EMC2301 register, with retries. For a write, *value is
+ * the byte to send; for a read, *value receives the byte.
  */
-static int emc2301_reg_read(uint8_t reg, uint8_t *value)
+static int emc2301_reg_access(uint8_t reg, uint8_t *value, bool write)
 {
-	int ret;
-	int retries = 3;
+	const char *op = write ? "write" : "read";
+	int ret = -EIO;
 
 	if (!device_is_ready(i2c_dev)) {
 		LOG_ERR("I2C device not ready");
 		return -ENODEV;
 	}
 
-	while (retries-- > 0) {
-		ret = i2c_reg_read_byte(i2c_dev, EMC2301_I2C_ADDR, reg, value);
+	for (int retries = EMC2301_I2C_RETRIES; retries > 0; retries--) {
+		ret = write ? i2c_reg_write_byte(i2c_dev, EMC2301_I2C_ADDR, reg, *value)
+			    : i2c_reg_read_byte(i2c_dev, EMC2301_I2C_ADDR, reg, value);
 		if (ret >= 0) {
-			LOG_DBG("I2C read: reg=0x%02x, value=0x%02x", reg, *value);
+			LOG_DBG("I2C %s: reg=0x%02x, value=0x%02x", op, reg, *value);
 			return ret;
 		}
-		
-		if (retries > 0) {
-			LOG_WRN("I2C read retry: reg=0x%02x, ret=%d, retries left=%d", reg, ret, retries);
-			k_msleep(10);  /* Small delay before retry */
+
+		if (retries > 1) {
+			LOG_WRN("I2C %s retry: reg=0x%02x, ret=%d, retries left=%d",
+				op, reg, ret, retries - 1);
+			k_msleep(EMC2301_I2C_RETRY_MS);
 		}
 	}
-	
-	LOG_ERR("I2C read failed: reg=0x%02x, ret=%d", reg, ret);
+
+	LOG_ERR("I2C %s failed: reg=0x%02x, ret=%d", op, reg, ret);
 	return ret;
 }
 
-/**
- * Write a single byte to EMC2301 register
- */
+static int emc2301_reg_read(uint8_t reg, uint8_t *value)
+{
+	return emc2301_reg_access(reg, value, false);
+}
+
 static int emc2301_reg_write(uint8_t reg, uint8_t value)
 {
-	int ret;
-	int retries = 3;
-
-	if (!device_is_ready(i2c_dev)) {
-		LOG_ERR("I2C device not ready");
-		return -ENODEV;
-	}
-
-	while (retries-- > 0) {
-		ret = i2c_reg_write_byte(i2c_dev, EMC2301_I2C_ADDR, reg, value);
-		if (ret >= 0) {
-			LOG_DBG("I2C write: reg=0x%02x, value=0x%02x", reg, value);
-			return ret;
-		}
-		
-		if (retries > 0) {
-			LOG_WRN("I2C write retry: reg=0x%02x, value=0x%02x, ret=%d, retries left=%d", 
-				reg, value, ret, retries);
-			k_msleep(10);  /* Small delay before retry */
-		}
-	}
-	
-	LOG_ERR("I2C write failed: reg=0x%02x, value=0x%02x, ret=%d", reg, value, ret);
-	return ret;
+	return emc2301_reg_access(reg, &value, true);
 }
 
 /**

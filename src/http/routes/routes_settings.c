@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <zephyr/data/json.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/net/http/server.h>
 #include <zephyr/sys/util.h>
@@ -59,62 +60,127 @@ static enum ipv6_mode ipv6_mode_from_string(const char *value, enum ipv6_mode fa
 	return fallback;
 }
 
-static bool parse_json_bool(const char *value_start, bool *out)
+/* ---- JSON-library parsing of the settings POST body ----------------------
+ * The body is {"network":{...},"power":{...},"http":{...},"environment":{...},
+ * "console":{...}} and each web-UI page posts one sub-object. json_obj_parse()
+ * skips keys it doesn't know and only writes fields it finds, so we pre-seed the
+ * parse target from the current settings: any field a page omits (e.g. the
+ * environment page predates primary_temp_source) keeps its current value.
+ * Strings arrive as pointers into the (mutated) payload buffer, numbers widen to
+ * int32, booleans to bool, the fan-curve temperature to float, and the ip_method
+ * / ipv6_mode enums arrive as strings.
+ */
+struct curve_json {
+	float temperature;
+	int32_t fan_percent;
+};
+
+struct net_json {
+	char *hostname, *ip_method, *ip_addr, *ip_mask, *gw_addr, *dns1;
+	char *ipv6_mode, *ipv6_addr, *ipv6_gateway, *ipv6_dns1;
+	int32_t ipv6_prefix_length;
+};
+
+struct power_json {
+	bool ignore_power_switch, on_boot, follow_usb;
+	int32_t on_boot_delay, follow_usb_delay;
+};
+
+struct http_json {
+	bool enable_http, enable_https, use_custom_certificates;
+	int32_t http_port, https_port;
+};
+
+struct env_json {
+	bool use_external_fan_control;
+	int32_t fan_update_interval_ms, fan_hysteresis_percent, primary_temp_source;
+	struct curve_json fan_curve[5];
+	size_t fan_curve_count;
+};
+
+struct console_json {
+	bool uart_enabled, usb_enabled;
+};
+
+struct settings_json {
+	struct net_json network;
+	struct power_json power;
+	struct http_json http;
+	struct env_json environment;
+	struct console_json console;
+};
+
+static const struct json_obj_descr curve_descr[] = {
+	JSON_OBJ_DESCR_PRIM(struct curve_json, temperature, JSON_TOK_FLOAT_FP),
+	JSON_OBJ_DESCR_PRIM(struct curve_json, fan_percent, JSON_TOK_NUMBER),
+};
+
+static const struct json_obj_descr net_descr[] = {
+	JSON_OBJ_DESCR_PRIM(struct net_json, hostname, JSON_TOK_STRING),
+	JSON_OBJ_DESCR_PRIM(struct net_json, ip_method, JSON_TOK_STRING),
+	JSON_OBJ_DESCR_PRIM(struct net_json, ip_addr, JSON_TOK_STRING),
+	JSON_OBJ_DESCR_PRIM(struct net_json, ip_mask, JSON_TOK_STRING),
+	JSON_OBJ_DESCR_PRIM(struct net_json, gw_addr, JSON_TOK_STRING),
+	JSON_OBJ_DESCR_PRIM(struct net_json, dns1, JSON_TOK_STRING),
+	JSON_OBJ_DESCR_PRIM(struct net_json, ipv6_mode, JSON_TOK_STRING),
+	JSON_OBJ_DESCR_PRIM(struct net_json, ipv6_addr, JSON_TOK_STRING),
+	JSON_OBJ_DESCR_PRIM(struct net_json, ipv6_gateway, JSON_TOK_STRING),
+	JSON_OBJ_DESCR_PRIM(struct net_json, ipv6_dns1, JSON_TOK_STRING),
+	JSON_OBJ_DESCR_PRIM(struct net_json, ipv6_prefix_length, JSON_TOK_NUMBER),
+};
+
+static const struct json_obj_descr power_descr[] = {
+	JSON_OBJ_DESCR_PRIM(struct power_json, ignore_power_switch, JSON_TOK_TRUE),
+	JSON_OBJ_DESCR_PRIM(struct power_json, on_boot, JSON_TOK_TRUE),
+	JSON_OBJ_DESCR_PRIM(struct power_json, on_boot_delay, JSON_TOK_NUMBER),
+	JSON_OBJ_DESCR_PRIM(struct power_json, follow_usb, JSON_TOK_TRUE),
+	JSON_OBJ_DESCR_PRIM(struct power_json, follow_usb_delay, JSON_TOK_NUMBER),
+};
+
+static const struct json_obj_descr http_descr[] = {
+	JSON_OBJ_DESCR_PRIM(struct http_json, enable_http, JSON_TOK_TRUE),
+	JSON_OBJ_DESCR_PRIM(struct http_json, enable_https, JSON_TOK_TRUE),
+	JSON_OBJ_DESCR_PRIM(struct http_json, http_port, JSON_TOK_NUMBER),
+	JSON_OBJ_DESCR_PRIM(struct http_json, https_port, JSON_TOK_NUMBER),
+	JSON_OBJ_DESCR_PRIM(struct http_json, use_custom_certificates, JSON_TOK_TRUE),
+};
+
+static const struct json_obj_descr env_descr[] = {
+	JSON_OBJ_DESCR_PRIM(struct env_json, use_external_fan_control, JSON_TOK_TRUE),
+	JSON_OBJ_DESCR_PRIM(struct env_json, fan_update_interval_ms, JSON_TOK_NUMBER),
+	JSON_OBJ_DESCR_PRIM(struct env_json, fan_hysteresis_percent, JSON_TOK_NUMBER),
+	JSON_OBJ_DESCR_PRIM(struct env_json, primary_temp_source, JSON_TOK_NUMBER),
+	JSON_OBJ_DESCR_OBJ_ARRAY(struct env_json, fan_curve, 5, fan_curve_count,
+				 curve_descr, ARRAY_SIZE(curve_descr)),
+};
+
+static const struct json_obj_descr console_descr[] = {
+	JSON_OBJ_DESCR_PRIM(struct console_json, uart_enabled, JSON_TOK_TRUE),
+	JSON_OBJ_DESCR_PRIM(struct console_json, usb_enabled, JSON_TOK_TRUE),
+};
+
+static const struct json_obj_descr settings_descr[] = {
+	JSON_OBJ_DESCR_OBJECT(struct settings_json, network, net_descr),
+	JSON_OBJ_DESCR_OBJECT(struct settings_json, power, power_descr),
+	JSON_OBJ_DESCR_OBJECT(struct settings_json, http, http_descr),
+	JSON_OBJ_DESCR_OBJECT(struct settings_json, environment, env_descr),
+	JSON_OBJ_DESCR_OBJECT(struct settings_json, console, console_descr),
+};
+
+/* Top-level presence bits returned by json_obj_parse() (descriptor order). */
+#define SJ_NETWORK     BIT(0)
+#define SJ_POWER       BIT(1)
+#define SJ_HTTP        BIT(2)
+#define SJ_ENVIRONMENT BIT(3)
+#define SJ_CONSOLE     BIT(4)
+
+/* Copy a parsed string into a fixed settings field only if it was present. */
+static void apply_str(char *dst, size_t cap, const char *src)
 {
-	if (!value_start || !out) {
-		return false;
+	if (src != NULL) {
+		strncpy(dst, src, cap - 1);
+		dst[cap - 1] = '\0';
 	}
-
-	while (isspace((unsigned char)*value_start)) {
-		value_start++;
-	}
-
-	if (strncmp(value_start, "true", 4) == 0) {
-		*out = true;
-		return true;
-	}
-
-	if (strncmp(value_start, "false", 5) == 0) {
-		*out = false;
-		return true;
-	}
-
-	return false;
-}
-
-static char *parse_json_string_field(char *field_start, char *dest, size_t dest_size,
-					 const char *field_name)
-{
-	if (!field_start) {
-		return NULL;
-	}
-
-	while (*field_start == ' ' || *field_start == '\t') {
-		field_start++;
-	}
-
-	if (*field_start != '"') {
-		LOG_WRN("%s field found but no opening quote", field_name);
-		return NULL;
-	}
-
-	field_start++;
-	char *end = strchr(field_start, '"');
-	if (!end) {
-		LOG_WRN("%s field found but no closing quote", field_name);
-		return NULL;
-	}
-
-	int len = end - field_start;
-	if (len >= dest_size) {
-		LOG_WRN("%s too long: %d >= %zu", field_name, len, dest_size);
-		return NULL;
-	}
-
-	strncpy(dest, field_start, len);
-	dest[len] = '\0';
-
-	return dest;
 }
 
 static int settings_handler(struct http_client_ctx *client, enum http_data_status status,
@@ -131,7 +197,7 @@ static int settings_handler(struct http_client_ctx *client, enum http_data_statu
 	LOG_DBG("Settings handler status %d, method %d", status, method);
 
 	if (method == HTTP_GET && status == HTTP_SERVER_DATA_FINAL) {
-		int auth_result = http_basic_auth_check(client);
+		int auth_result = http_check_auth(client);
 		if (auth_result != 0) {
 			LOG_WRN("Authentication failed for settings endpoint");
 			http_send_auth_required_response(response_ctx);
@@ -140,7 +206,7 @@ static int settings_handler(struct http_client_ctx *client, enum http_data_statu
 
 		struct openjbod_settings *current = openjbod_settings_get();
 
-		snprintf(response_buffer, sizeof(response_buffer),
+		int written = snprintf(response_buffer, sizeof(response_buffer),
 			 "{"
 			 "\"network\":{"
 			 "\"ip_method\":\"%s\"," 
@@ -173,6 +239,7 @@ static int settings_handler(struct http_client_ctx *client, enum http_data_statu
 			 "\"use_external_fan_control\":%s,"
 			 "\"fan_update_interval_ms\":%u,"
 			 "\"fan_hysteresis_percent\":%u,"
+			 "\"primary_temp_source\":%u,"
 			 "\"fan_curve\":["
 			 "{\"temperature\":%.1f,\"fan_percent\":%u},"
 			 "{\"temperature\":%.1f,\"fan_percent\":%u},"
@@ -180,6 +247,10 @@ static int settings_handler(struct http_client_ctx *client, enum http_data_statu
 			 "{\"temperature\":%.1f,\"fan_percent\":%u},"
 			 "{\"temperature\":%.1f,\"fan_percent\":%u}"
 			 "]"
+			 "},"
+			 "\"console\":{"
+			 "\"uart_enabled\":%s,"
+			 "\"usb_enabled\":%s"
 			 "}"
 			 "}",
 			 current->network.ip_method == IP_METHOD_DHCP ? "dhcp" : "static",
@@ -206,6 +277,7 @@ static int settings_handler(struct http_client_ctx *client, enum http_data_statu
 			 current->environment.use_external_fan_control ? "true" : "false",
 			 current->environment.fan_update_interval_ms,
 			 current->environment.fan_hysteresis_percent,
+			 current->environment.primary_temp_source,
 			 (double)current->environment.fan_curve[0].temperature,
 			 current->environment.fan_curve[0].fan_percent,
 			 (double)current->environment.fan_curve[1].temperature,
@@ -215,14 +287,23 @@ static int settings_handler(struct http_client_ctx *client, enum http_data_statu
 			 (double)current->environment.fan_curve[3].temperature,
 			 current->environment.fan_curve[3].fan_percent,
 			 (double)current->environment.fan_curve[4].temperature,
-			 current->environment.fan_curve[4].fan_percent);
+			 current->environment.fan_curve[4].fan_percent,
+			 current->console.uart_enabled ? "true" : "false",
+			 current->console.usb_enabled ? "true" : "false");
+
+		if (written < 0 || written >= (int)sizeof(response_buffer)) {
+			LOG_ERR("Settings JSON truncated (%d/%zu bytes)", written, sizeof(response_buffer));
+			written = snprintf(response_buffer, sizeof(response_buffer),
+				 "{\"status\":\"error\",\"message\":\"settings response too large\"}");
+			response_ctx->status = HTTP_500_INTERNAL_SERVER_ERROR;
+		}
 
 		response_ctx->body = response_buffer;
 		response_ctx->body_len = strlen(response_buffer);
 		response_ctx->final_chunk = true;
 	} else if (method == HTTP_POST) {
 		if (status == HTTP_SERVER_DATA_FINAL) {
-			int auth_result = http_basic_auth_check(client);
+			int auth_result = http_check_auth(client);
 			if (auth_result != 0) {
 				LOG_WRN("Authentication failed for settings endpoint");
 				http_send_auth_required_response(response_ctx);
@@ -247,408 +328,111 @@ static int settings_handler(struct http_client_ctx *client, enum http_data_statu
 			struct power_settings new_power = current->power;
 			struct http_settings new_http = current->http;
 			struct environment_settings new_environment = current->environment;
+			struct console_settings new_console = current->console;
 			bool network_changed = false;
 			bool power_changed = false;
 			bool http_changed = false;
 			bool environment_changed = false;
-			char *network_start = strstr(post_payload_buf, "\"network\":");
+			bool console_changed = false;
 
-			if (network_start) {
-				char *ip_method = strstr(network_start, "\"ip_method\":");
-				if (ip_method) {
-					ip_method += 12;
-					while (*ip_method == ' ' || *ip_method == '\t') {
-						ip_method++;
-					}
-					if (*ip_method == '"') {
-						ip_method++;
-						enum ip_method new_method;
-						if (strncmp(ip_method, "dhcp", 4) == 0) {
-							new_method = IP_METHOD_DHCP;
-						} else if (strncmp(ip_method, "static", 6) == 0) {
-							new_method = IP_METHOD_STATIC;
-						} else {
-							new_method = current->network.ip_method;
-						}
+			/* Pre-seed the parse target from current settings so any field a
+			 * page omits keeps its current value (strings stay NULL = keep).
+			 */
+			struct settings_json sj;
 
-						if (new_method != current->network.ip_method) {
-							new_network.ip_method = new_method;
-							network_changed = true;
-							LOG_INF("ip_method changed to: %d", new_method);
-						}
-					}
-				}
+			memset(&sj, 0, sizeof(sj));
+			sj.network.ipv6_prefix_length = current->network.ipv6_prefix_length;
+			sj.power.ignore_power_switch = current->power.ignore_power_switch;
+			sj.power.on_boot = current->power.on_boot;
+			sj.power.on_boot_delay = current->power.on_boot_delay;
+			sj.power.follow_usb = current->power.follow_usb;
+			sj.power.follow_usb_delay = current->power.follow_usb_delay;
+			sj.http.enable_http = current->http.enable_http;
+			sj.http.enable_https = current->http.enable_https;
+			sj.http.http_port = current->http.http_port;
+			sj.http.https_port = current->http.https_port;
+			sj.http.use_custom_certificates = current->http.use_custom_certificates;
+			sj.environment.use_external_fan_control = current->environment.use_external_fan_control;
+			sj.environment.fan_update_interval_ms = current->environment.fan_update_interval_ms;
+			sj.environment.fan_hysteresis_percent = current->environment.fan_hysteresis_percent;
+			sj.environment.primary_temp_source = current->environment.primary_temp_source;
+			for (int i = 0; i < 5; i++) {
+				sj.environment.fan_curve[i].temperature =
+					current->environment.fan_curve[i].temperature;
+				sj.environment.fan_curve[i].fan_percent =
+					current->environment.fan_curve[i].fan_percent;
+			}
+			sj.console.uart_enabled = current->console.uart_enabled;
+			sj.console.usb_enabled = current->console.usb_enabled;
 
-				char *ipv6_mode = strstr(network_start, "\"ipv6_mode\":");
-				if (ipv6_mode) {
-					char mode_str[16];
-					if (parse_json_string_field(ipv6_mode + strlen("\"ipv6_mode\":"),
-							 mode_str, sizeof(mode_str), "ipv6_mode")) {
-						enum ipv6_mode new_mode = ipv6_mode_from_string(mode_str,
-								current->network.ipv6_mode);
-						if (new_mode != current->network.ipv6_mode) {
-							new_network.ipv6_mode = new_mode;
-							network_changed = true;
-							LOG_INF("ipv6_mode changed to: %s", mode_str);
-						}
-					}
-				}
-
-				char *ip_addr = strstr(network_start, "\"ip_addr\":\"");
-				if (ip_addr) {
-					ip_addr += 11;
-					char *end = strchr(ip_addr, '"');
-					if (end && (size_t)(end - ip_addr) < sizeof(new_network.ip_addr)) {
-						char temp_addr[sizeof(new_network.ip_addr)];
-						strncpy(temp_addr, ip_addr, end - ip_addr);
-						temp_addr[end - ip_addr] = '\0';
-
-						if (strcmp(temp_addr, current->network.ip_addr) != 0) {
-							strcpy(new_network.ip_addr, temp_addr);
-							network_changed = true;
-							LOG_INF("ip_addr changed to: %s", temp_addr);
-						}
-					}
-				}
-
-				char *gw_addr = strstr(network_start, "\"gw_addr\":\"");
-				if (gw_addr) {
-					gw_addr += 11;
-					char *end = strchr(gw_addr, '"');
-					if (end && (size_t)(end - gw_addr) < sizeof(new_network.gw_addr)) {
-						char temp_addr[sizeof(new_network.gw_addr)];
-						strncpy(temp_addr, gw_addr, end - gw_addr);
-						temp_addr[end - gw_addr] = '\0';
-
-						if (strcmp(temp_addr, current->network.gw_addr) != 0) {
-							strcpy(new_network.gw_addr, temp_addr);
-							network_changed = true;
-							LOG_INF("gw_addr changed to: %s", temp_addr);
-						}
-					}
-				}
-
-				char *ip_mask = strstr(network_start, "\"ip_mask\":\"");
-				if (ip_mask) {
-					ip_mask += 11;
-					char *end = strchr(ip_mask, '"');
-					if (end && (size_t)(end - ip_mask) < sizeof(new_network.ip_mask)) {
-						char temp_mask[sizeof(new_network.ip_mask)];
-						strncpy(temp_mask, ip_mask, end - ip_mask);
-						temp_mask[end - ip_mask] = '\0';
-
-						if (strcmp(temp_mask, current->network.ip_mask) != 0) {
-							strcpy(new_network.ip_mask, temp_mask);
-							network_changed = true;
-							LOG_INF("ip_mask changed to: %s", temp_mask);
-						}
-					}
-				}
-
-				char *dns1 = strstr(network_start, "\"dns1\":\"");
-				if (dns1) {
-					dns1 += strlen("\"dns1\":\"");
-					char *end = strchr(dns1, '"');
-					if (end && (size_t)(end - dns1) < sizeof(new_network.dns1)) {
-						char temp_dns[sizeof(new_network.dns1)];
-						strncpy(temp_dns, dns1, end - dns1);
-						temp_dns[end - dns1] = '\0';
-
-						if (strcmp(temp_dns, current->network.dns1) != 0) {
-							strcpy(new_network.dns1, temp_dns);
-							network_changed = true;
-							LOG_INF("dns1 changed to: %s", temp_dns);
-						}
-					}
-				}
-
-				char *hostname_field = strstr(network_start, "\"hostname\":");
-				if (hostname_field) {
-					char temp_hostname[sizeof(new_network.hostname)];
-					if (parse_json_string_field(hostname_field + 11, temp_hostname,
-							      sizeof(temp_hostname), "hostname")) {
-						if (strcmp(temp_hostname, current->network.hostname) != 0) {
-							strcpy(new_network.hostname, temp_hostname);
-							network_changed = true;
-							LOG_INF("hostname changed to: %s", temp_hostname);
-						}
-					}
-				}
-
-				char *ipv6_addr = strstr(network_start, "\"ipv6_addr\":\"");
-				if (ipv6_addr) {
-					ipv6_addr += strlen("\"ipv6_addr\":\"");
-					char *end = strchr(ipv6_addr, '"');
-					if (end && (size_t)(end - ipv6_addr) < sizeof(new_network.ipv6_addr)) {
-						char temp_addr[sizeof(new_network.ipv6_addr)];
-						strncpy(temp_addr, ipv6_addr, end - ipv6_addr);
-						temp_addr[end - ipv6_addr] = '\0';
-
-						if (strcmp(temp_addr, current->network.ipv6_addr) != 0) {
-							strcpy(new_network.ipv6_addr, temp_addr);
-							network_changed = true;
-							LOG_INF("ipv6_addr changed to: %s", temp_addr);
-						}
-					}
-				}
-
-				char *ipv6_prefix = strstr(network_start, "\"ipv6_prefix_length\":");
-				if (ipv6_prefix) {
-					ipv6_prefix += strlen("\"ipv6_prefix_length\":");
-					unsigned long parsed = strtoul(ipv6_prefix, NULL, 10);
-					if (parsed <= 128 &&
-					    (uint8_t)parsed != current->network.ipv6_prefix_length) {
-						new_network.ipv6_prefix_length = (uint8_t)parsed;
-						network_changed = true;
-						LOG_INF("ipv6_prefix_length changed to: %lu", parsed);
-					}
-				}
-
-				char *ipv6_gateway = strstr(network_start, "\"ipv6_gateway\":\"");
-				if (ipv6_gateway) {
-					ipv6_gateway += strlen("\"ipv6_gateway\":\"");
-					char *end = strchr(ipv6_gateway, '"');
-					if (end && (size_t)(end - ipv6_gateway) < sizeof(new_network.ipv6_gateway)) {
-						char temp_gw[sizeof(new_network.ipv6_gateway)];
-						strncpy(temp_gw, ipv6_gateway, end - ipv6_gateway);
-						temp_gw[end - ipv6_gateway] = '\0';
-
-						if (strcmp(temp_gw, current->network.ipv6_gateway) != 0) {
-							strcpy(new_network.ipv6_gateway, temp_gw);
-							network_changed = true;
-							LOG_INF("ipv6_gateway changed to: %s", temp_gw);
-						}
-					}
-				}
-
-				char *ipv6_dns = strstr(network_start, "\"ipv6_dns1\":\"");
-				if (ipv6_dns) {
-					ipv6_dns += strlen("\"ipv6_dns1\":\"");
-					char *end = strchr(ipv6_dns, '"');
-					if (end && (size_t)(end - ipv6_dns) < sizeof(new_network.ipv6_dns1)) {
-						char temp_dns[sizeof(new_network.ipv6_dns1)];
-						strncpy(temp_dns, ipv6_dns, end - ipv6_dns);
-						temp_dns[end - ipv6_dns] = '\0';
-
-						if (strcmp(temp_dns, current->network.ipv6_dns1) != 0) {
-							strcpy(new_network.ipv6_dns1, temp_dns);
-							network_changed = true;
-							LOG_INF("ipv6_dns1 changed to: %s", temp_dns);
-						}
-					}
-				}
+			int64_t parsed = json_obj_parse(post_payload_buf, strlen(post_payload_buf),
+							settings_descr, ARRAY_SIZE(settings_descr), &sj);
+			if (parsed < 0) {
+				LOG_WRN("Failed to parse settings JSON: %lld", parsed);
+				snprintf(response_buffer, sizeof(response_buffer),
+					 "{\"status\":\"settings_error\",\"error\":\"Invalid JSON body\"}");
+				response_ctx->status = HTTP_400_BAD_REQUEST;
+				response_ctx->body = response_buffer;
+				response_ctx->body_len = strlen(response_buffer);
+				response_ctx->final_chunk = true;
+				cursor = 0;
+				return 0;
 			}
 
-			char *power_start = strstr(post_payload_buf, "\"power\":");
-			if (power_start) {
-				char *ignore_switch = strstr(power_start, "\"ignore_power_switch\":");
-				if (ignore_switch) {
-					ignore_switch += strlen("\"ignore_power_switch\":");
-					bool new_ignore = current->power.ignore_power_switch;
-					if (parse_json_bool(ignore_switch, &new_ignore) &&
-					    new_ignore != current->power.ignore_power_switch) {
-						new_power.ignore_power_switch = new_ignore;
-						power_changed = true;
-						LOG_INF("ignore_power_switch changed to: %d", new_ignore);
-					}
+			if (parsed & SJ_NETWORK) {
+				network_changed = true;
+				if (sj.network.ip_method) {
+					new_network.ip_method =
+						(strcmp(sj.network.ip_method, "static") == 0)
+							? IP_METHOD_STATIC : IP_METHOD_DHCP;
 				}
-
-				char *on_boot = strstr(power_start, "\"on_boot\":");
-				if (on_boot) {
-					on_boot += strlen("\"on_boot\":");
-					bool new_on_boot = current->power.on_boot;
-					if (parse_json_bool(on_boot, &new_on_boot) &&
-					    new_on_boot != current->power.on_boot) {
-						new_power.on_boot = new_on_boot;
-						power_changed = true;
-						LOG_INF("on_boot changed to: %d", new_on_boot);
-					}
+				apply_str(new_network.hostname, sizeof(new_network.hostname), sj.network.hostname);
+				apply_str(new_network.ip_addr, sizeof(new_network.ip_addr), sj.network.ip_addr);
+				apply_str(new_network.gw_addr, sizeof(new_network.gw_addr), sj.network.gw_addr);
+				apply_str(new_network.ip_mask, sizeof(new_network.ip_mask), sj.network.ip_mask);
+				apply_str(new_network.dns1, sizeof(new_network.dns1), sj.network.dns1);
+				if (sj.network.ipv6_mode) {
+					new_network.ipv6_mode = ipv6_mode_from_string(
+						sj.network.ipv6_mode, current->network.ipv6_mode);
 				}
-
-				char *on_boot_delay = strstr(power_start, "\"on_boot_delay\":");
-				if (on_boot_delay) {
-					on_boot_delay += 16;
-					uint32_t new_delay = (uint32_t)atoi(on_boot_delay);
-					if (new_delay != current->power.on_boot_delay) {
-						new_power.on_boot_delay = new_delay;
-						power_changed = true;
-						LOG_INF("on_boot_delay changed to: %u", new_delay);
-					}
-				}
-
-				char *follow_usb = strstr(power_start, "\"follow_usb\":");
-				if (follow_usb) {
-					follow_usb += strlen("\"follow_usb\":");
-					bool new_follow_usb = current->power.follow_usb;
-					if (parse_json_bool(follow_usb, &new_follow_usb) &&
-					    new_follow_usb != current->power.follow_usb) {
-						new_power.follow_usb = new_follow_usb;
-						power_changed = true;
-						LOG_INF("follow_usb changed to: %d", new_follow_usb);
-					}
-				}
-
-				char *follow_usb_delay = strstr(power_start, "\"follow_usb_delay\":");
-				if (follow_usb_delay) {
-					follow_usb_delay += 19;
-					uint32_t new_delay = (uint32_t)atoi(follow_usb_delay);
-					if (new_delay != current->power.follow_usb_delay) {
-						new_power.follow_usb_delay = new_delay;
-						power_changed = true;
-						LOG_INF("follow_usb_delay changed to: %u", new_delay);
-					}
+				apply_str(new_network.ipv6_addr, sizeof(new_network.ipv6_addr), sj.network.ipv6_addr);
+				new_network.ipv6_prefix_length = (uint8_t)sj.network.ipv6_prefix_length;
+				apply_str(new_network.ipv6_gateway, sizeof(new_network.ipv6_gateway), sj.network.ipv6_gateway);
+				apply_str(new_network.ipv6_dns1, sizeof(new_network.ipv6_dns1), sj.network.ipv6_dns1);
+			}
+			if (parsed & SJ_POWER) {
+				power_changed = true;
+				new_power.ignore_power_switch = sj.power.ignore_power_switch;
+				new_power.on_boot = sj.power.on_boot;
+				new_power.on_boot_delay = (uint32_t)sj.power.on_boot_delay;
+				new_power.follow_usb = sj.power.follow_usb;
+				new_power.follow_usb_delay = (uint32_t)sj.power.follow_usb_delay;
+			}
+			if (parsed & SJ_HTTP) {
+				http_changed = true;
+				new_http.enable_http = sj.http.enable_http;
+				new_http.enable_https = sj.http.enable_https;
+				new_http.http_port = (uint16_t)sj.http.http_port;
+				new_http.https_port = (uint16_t)sj.http.https_port;
+				new_http.use_custom_certificates = sj.http.use_custom_certificates;
+			}
+			if (parsed & SJ_ENVIRONMENT) {
+				environment_changed = true;
+				new_environment.use_external_fan_control = sj.environment.use_external_fan_control;
+				new_environment.fan_update_interval_ms = (uint32_t)sj.environment.fan_update_interval_ms;
+				new_environment.fan_hysteresis_percent = (uint8_t)sj.environment.fan_hysteresis_percent;
+				new_environment.primary_temp_source = (uint8_t)sj.environment.primary_temp_source;
+				for (int i = 0; i < 5; i++) {
+					new_environment.fan_curve[i].temperature =
+						sj.environment.fan_curve[i].temperature;
+					new_environment.fan_curve[i].fan_percent =
+						(uint8_t)sj.environment.fan_curve[i].fan_percent;
 				}
 			}
-
-			char *http_start = strstr(post_payload_buf, "\"http\":");
-			if (http_start) {
-				char *enable_http = strstr(http_start, "\"enable_http\":");
-				if (enable_http) {
-					enable_http += strlen("\"enable_http\":");
-					bool new_enable_http = current->http.enable_http;
-					if (parse_json_bool(enable_http, &new_enable_http) &&
-					    new_enable_http != current->http.enable_http) {
-						new_http.enable_http = new_enable_http;
-						http_changed = true;
-						LOG_INF("enable_http changed to: %d", new_enable_http);
-					}
-				}
-
-				char *enable_https = strstr(http_start, "\"enable_https\":");
-				if (enable_https) {
-					enable_https += strlen("\"enable_https\":");
-					bool new_enable_https = current->http.enable_https;
-					if (parse_json_bool(enable_https, &new_enable_https) &&
-					    new_enable_https != current->http.enable_https) {
-						new_http.enable_https = new_enable_https;
-						http_changed = true;
-						LOG_INF("enable_https changed to: %d", new_enable_https);
-					}
-				}
-
-				char *http_port = strstr(http_start, "\"http_port\":");
-				if (http_port) {
-					http_port += 12;
-					uint16_t new_http_port = (uint16_t)atoi(http_port);
-					if (new_http_port != current->http.http_port) {
-						new_http.http_port = new_http_port;
-						http_changed = true;
-						LOG_INF("http_port changed to: %u", new_http_port);
-					}
-				}
-
-				char *https_port = strstr(http_start, "\"https_port\":");
-				if (https_port) {
-					https_port += 13;
-					uint16_t new_https_port = (uint16_t)atoi(https_port);
-					if (new_https_port != current->http.https_port) {
-						new_http.https_port = new_https_port;
-						http_changed = true;
-						LOG_INF("https_port changed to: %u", new_https_port);
-					}
-				}
-
-				char *custom_certs = strstr(http_start, "\"use_custom_certificates\":");
-				if (custom_certs) {
-					custom_certs += strlen("\"use_custom_certificates\":");
-					bool new_use_custom = current->http.use_custom_certificates;
-					if (parse_json_bool(custom_certs, &new_use_custom) &&
-					    new_use_custom != current->http.use_custom_certificates) {
-						new_http.use_custom_certificates = new_use_custom;
-						http_changed = true;
-						LOG_INF("use_custom_certificates changed to: %d", new_use_custom);
-					}
-				}
-			}
-
-			char *environment_start = strstr(post_payload_buf, "\"environment\":");
-			if (environment_start) {
-				char *external_control = strstr(environment_start,
-							      "\"use_external_fan_control\":");
-				if (external_control) {
-					external_control += strlen("\"use_external_fan_control\":");
-					bool new_external = current->environment.use_external_fan_control;
-					if (parse_json_bool(external_control, &new_external) &&
-					    new_external != current->environment.use_external_fan_control) {
-						new_environment.use_external_fan_control = new_external;
-						environment_changed = true;
-						LOG_INF("use_external_fan_control changed to: %d", new_external);
-					}
-				}
-
-				char *update_interval = strstr(environment_start,
-							      "\"fan_update_interval_ms\":");
-				if (update_interval) {
-					update_interval += strlen("\"fan_update_interval_ms\":");
-					uint32_t new_interval = (uint32_t)atoi(update_interval);
-					if (new_interval != current->environment.fan_update_interval_ms) {
-						new_environment.fan_update_interval_ms = new_interval;
-						environment_changed = true;
-						LOG_INF("fan_update_interval_ms changed to: %u", new_interval);
-					}
-				}
-
-				char *hysteresis = strstr(environment_start,
-						      "\"fan_hysteresis_percent\":");
-				if (hysteresis) {
-					hysteresis += strlen("\"fan_hysteresis_percent\":");
-					uint8_t new_hysteresis = (uint8_t)atoi(hysteresis);
-					if (new_hysteresis != current->environment.fan_hysteresis_percent) {
-						new_environment.fan_hysteresis_percent = new_hysteresis;
-						environment_changed = true;
-						LOG_INF("fan_hysteresis_percent changed to: %u", new_hysteresis);
-					}
-				}
-
-				char *fan_curve = strstr(environment_start, "\"fan_curve\":");
-				if (fan_curve) {
-					char *fan_curve_array = strchr(fan_curve, '[');
-					if (fan_curve_array) {
-						char *curve_cursor = fan_curve_array;
-						for (int i = 0; i < ARRAY_SIZE(current->environment.fan_curve); i++) {
-							char *curve_obj = strchr(curve_cursor, '{');
-							if (!curve_obj) {
-								break;
-							}
-
-							char *curve_end = strchr(curve_obj, '}');
-							if (!curve_end) {
-								break;
-							}
-
-							char *temp_field = strstr(curve_obj, "\"temperature\":");
-							if (temp_field && temp_field < curve_end) {
-								temp_field += strlen("\"temperature\":");
-								while (*temp_field == ' ' || *temp_field == '\t') {
-									temp_field++;
-								}
-								float new_temp = strtof(temp_field, NULL);
-								if (new_temp != current->environment.fan_curve[i].temperature) {
-									new_environment.fan_curve[i].temperature = new_temp;
-									environment_changed = true;
-									LOG_INF("fan_curve[%d].temperature changed to: %.1f", i, (double)new_temp);
-								}
-							}
-
-							char *percent_field = strstr(curve_obj, "\"fan_percent\":");
-							if (percent_field && percent_field < curve_end) {
-								percent_field += strlen("\"fan_percent\":");
-								while (*percent_field == ' ' || *percent_field == '\t') {
-									percent_field++;
-								}
-								uint8_t new_percent = (uint8_t)atoi(percent_field);
-								if (new_percent != current->environment.fan_curve[i].fan_percent &&
-								    new_percent <= 100) {
-									new_environment.fan_curve[i].fan_percent = new_percent;
-									environment_changed = true;
-									LOG_INF("fan_curve[%d].fan_percent changed to: %u", i, new_percent);
-								}
-							}
-
-							curve_cursor = curve_end + 1;
-						}
-					}
-				}
+			if (parsed & SJ_CONSOLE) {
+				console_changed = true;
+				new_console.uart_enabled = sj.console.uart_enabled;
+				new_console.usb_enabled = sj.console.usb_enabled;
 			}
 
 			int ret = 0;
@@ -681,6 +465,14 @@ static int settings_handler(struct http_client_ctx *client, enum http_data_statu
 					LOG_INF("Environment settings updated successfully");
 				}
 			}
+			if (console_changed && ret == 0) {
+				ret = openjbod_settings_set_console(&new_console);
+				if (ret != 0) {
+					LOG_ERR("Failed to save console settings: %d", ret);
+				} else {
+					LOG_INF("Console settings updated (reboot to apply)");
+				}
+			}
 
 			if (ret == 0) {
 				snprintf(response_buffer, sizeof(response_buffer),
@@ -688,6 +480,7 @@ static int settings_handler(struct http_client_ctx *client, enum http_data_statu
 			} else {
 				snprintf(response_buffer, sizeof(response_buffer),
 					 "{\"status\":\"settings_error\",\"error\":\"Failed to save settings\"}");
+				response_ctx->status = HTTP_500_INTERNAL_SERVER_ERROR;
 			}
 
 			cursor = 0;

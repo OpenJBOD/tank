@@ -38,12 +38,15 @@ target_sources(app PRIVATE
   src/main.c
   src/eeprom_mac.c
   src/sr_latch.c
+  src/status_led.c
   src/temperature.c
   src/emc2301.c
   src/fan_control.c
   src/settings.c
   src/device_info.c
   src/http/auth.c
+  src/http/session.c
+  src/http/api_token.c
   src/http/headers.c
   src/http/server_control.c
   src/http/static_assets.c
@@ -55,7 +58,25 @@ target_sources(app PRIVATE
   src/http/routes/routes_users.c
   src/http/routes/routes_certificates.c
   src/http/routes/routes_reset.c
+  src/http/routes/routes_auth.c
+  src/http/routes/routes_tokens.c
 )
+
+# Network firmware upgrade (DFU) - only when built under MCUboot (sysbuild).
+target_sources_ifdef(CONFIG_BOOTLOADER_MCUBOOT app PRIVATE src/firmware_update.c)
+
+# Development/debug UART shell commands (only useful when the shell is enabled).
+target_sources_ifdef(CONFIG_SHELL app PRIVATE src/shell_cmds.c)
+
+# USB CDC-ACM console: our bring-up code plus the canonical USBD init helper from
+# the Zephyr tree (its header explicitly invites reuse as a template).
+target_sources_ifdef(CONFIG_OPENJBOD_USB_CONSOLE app PRIVATE
+  src/usb_console.c
+  ${ZEPHYR_BASE}/samples/subsys/usb/common/sample_usbd_init.c
+)
+if(CONFIG_OPENJBOD_USB_CONSOLE)
+  target_include_directories(app PRIVATE ${ZEPHYR_BASE}/samples/subsys/usb/common)
+endif()
 
 target_include_directories(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
@@ -71,28 +92,47 @@ zephyr_linker_section_ifdef(CONFIG_NET_SAMPLE_HTTP_SERVICE NAME
 				http_resource_desc_test_http_service
 				KVMA RAM_REGION GROUP RODATA_REGION)
 
-foreach(web_resource
-  index.html
-  about.html
-  main.js
-  style.css
-  network.html
-  network.js
-  power.html
-  power.js
-  users.html
-  users.js
-  reset.html
-  reset.js
-  http.html
-  http.js
-  environment.html
-  environment.js
+set(WEBSRC ${CMAKE_CURRENT_SOURCE_DIR}/src/static_web_resources)
+set(WEB_INLINE_DIR ${CMAKE_BINARY_DIR}/web_inlined)
+
+# Every page now inlines its CSS/JS at build time (below), so the standalone asset
+# routes were removed - no separate <name>.js.gz.inc / style.css.gz.inc is embedded.
+# The source files are still read directly by the inliner.
+
+# HTML pages: inline /style.css, the page's own JS, and common.js so each page is a
+# SINGLE HTTPS request (one TLS handshake) instead of 3-4. Over HTTPS the handshake
+# is the whole cost and handshakes serialise on the one crypto core, so collapsing a
+# page to one request is the biggest load-time win. The inlined page is then gzipped
+# into the same <page>.html.gz.inc that static_assets.c already embeds.
+file(GLOB WEB_ASSET_DEPS ${WEBSRC}/*.js ${WEBSRC}/*.css)
+foreach(page
+  index
+  about
+  network
+  power
+  http
+  environment
+  console
+  users
+  tokens
+  firmware
+  reset
+  login
     )
+  add_custom_command(
+    OUTPUT ${WEB_INLINE_DIR}/${page}.html
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${WEB_INLINE_DIR}
+    COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/inline_web_assets.py
+            ${WEBSRC}/${page}.html ${WEBSRC} ${WEB_INLINE_DIR}/${page}.html
+    DEPENDS ${WEBSRC}/${page}.html ${WEB_ASSET_DEPS}
+            ${CMAKE_CURRENT_SOURCE_DIR}/scripts/inline_web_assets.py
+    COMMENT "Inlining web assets into ${page}.html"
+    VERBATIM
+  )
   generate_inc_file_for_target(
     app
-    src/static_web_resources/${web_resource}
-    ${gen_dir}/${web_resource}.gz.inc
+    ${WEB_INLINE_DIR}/${page}.html
+    ${gen_dir}/${page}.html.gz.inc
     --gzip
   )
 endforeach()

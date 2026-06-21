@@ -69,6 +69,17 @@ config NET_WEBSOCKET_STATS_INTERVAL
 	  This interval controls how often the net stats data shown on the web page
 	  will be updated.
 
+config OPENJBOD_USB_CONSOLE
+	bool "USB CDC-ACM console (secondary shell over USB)"
+	default y
+	depends on USB_DEVICE_STACK_NEXT && SHELL
+	help
+	  Bring up a USB CDC-ACM serial port and run a second Zephyr shell
+	  instance on it, in addition to the primary hardware UART shell. The
+	  hardware UART remains the chosen console; this adds USB without
+	  replacing it. Both backends can be disabled at runtime via the
+	  console settings group.
+
 if USB_DEVICE_STACK_NEXT
 # Source common USB sample options used to initialize new experimental USB
 # device stack. The scope of these options is limited to USB samples in project

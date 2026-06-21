@@ -20,7 +20,7 @@ static int power_on_handler(struct http_client_ctx *client, enum http_data_statu
 	ARG_UNUSED(user_data);
 
 	if (status == HTTP_SERVER_DATA_FINAL) {
-		int auth_result = http_basic_auth_check(client);
+		int auth_result = http_check_auth(client);
 		if (auth_result != 0) {
 			LOG_WRN("Authentication failed for power_on endpoint");
 			http_send_auth_required_response(response_ctx);
@@ -50,7 +50,7 @@ static int power_off_handler(struct http_client_ctx *client, enum http_data_stat
 	ARG_UNUSED(user_data);
 
 	if (status == HTTP_SERVER_DATA_FINAL) {
-		int auth_result = http_basic_auth_check(client);
+		int auth_result = http_check_auth(client);
 		if (auth_result != 0) {
 			LOG_WRN("Authentication failed for power_off endpoint");
 			http_send_auth_required_response(response_ctx);
@@ -80,7 +80,7 @@ static int power_status_handler(struct http_client_ctx *client, enum http_data_s
 	ARG_UNUSED(user_data);
 
 	if (status == HTTP_SERVER_DATA_FINAL) {
-		int auth_result = http_basic_auth_check(client);
+		int auth_result = http_check_auth(client);
 		if (auth_result != 0) {
 			LOG_WRN("Authentication failed for power_status endpoint");
 			http_send_auth_required_response(response_ctx);

@@ -1,5 +1,9 @@
 /*
  * Authentication helpers for the web server.
+ *
+ * The gate (http_check_auth) accepts either a valid session cookie (the browser
+ * login flow) or a bearer API token (scripts). HTTP Basic auth has been removed -
+ * see BASIC_AUTH_DEPRECATION.md.
  */
 
 #include <errno.h>
@@ -8,86 +12,112 @@
 
 #include <zephyr/logging/log.h>
 #include <zephyr/net/http/server.h>
-#include <zephyr/sys/base64.h>
 #include <zephyr/sys/util.h>
 
-#include "settings.h"
+#include "http/api_token.h"
+#include "http/auth.h"
+#include "http/session.h"
 
 LOG_MODULE_REGISTER(tank_auth, LOG_LEVEL_INF);
 
-int http_basic_auth_check(struct http_client_ctx *client)
+int http_get_cookie(struct http_client_ctx *client, const char *name, char *out, size_t out_len)
 {
 	const struct http_header *headers = client->header_capture_ctx.headers;
 	size_t header_count = client->header_capture_ctx.count;
-	const char *auth_header = NULL;
-	char credentials[256];
-	size_t credentials_len;
-	char username[64];
-	char password[64];
-	char *colon_pos;
-	int rc;
+	const char *cookie = NULL;
+	size_t name_len = strlen(name);
 
 	for (size_t i = 0; i < header_count; i++) {
-		if (strcasecmp(headers[i].name, "Authorization") == 0) {
-			auth_header = headers[i].value;
+		if (strcasecmp(headers[i].name, "Cookie") == 0) {
+			cookie = headers[i].value;
+			break;
+		}
+	}
+	if (!cookie) {
+		return -ENOENT;
+	}
+
+	/* Cookie: name1=value1; name2=value2 */
+	for (const char *p = cookie; p && *p;) {
+		while (*p == ' ') {
+			p++;
+		}
+		if (strncmp(p, name, name_len) == 0 && p[name_len] == '=') {
+			const char *v = p + name_len + 1;
+			const char *end = strchr(v, ';');
+			size_t vlen = end ? (size_t)(end - v) : strlen(v);
+
+			if (vlen >= out_len) {
+				return -ENOMEM;
+			}
+			memcpy(out, v, vlen);
+			out[vlen] = '\0';
+			return 0;
+		}
+		const char *semi = strchr(p, ';');
+
+		p = semi ? semi + 1 : NULL;
+	}
+	return -ENOENT;
+}
+
+int http_check_auth(struct http_client_ctx *client)
+{
+	char sid[SESSION_ID_HEX_LEN + 1];
+
+	/* 1. Browser session cookie. */
+	if (http_get_cookie(client, "session", sid, sizeof(sid)) == 0 &&
+	    session_validate(sid) == 0) {
+		return 0;
+	}
+
+	/* 2. Bearer API token (scripts). */
+	const struct http_header *headers = client->header_capture_ctx.headers;
+	size_t header_count = client->header_capture_ctx.count;
+
+	for (size_t i = 0; i < header_count; i++) {
+		if (strcasecmp(headers[i].name, "Authorization") == 0 &&
+		    strncasecmp(headers[i].value, "Bearer ", 7) == 0) {
+			if (api_token_validate(headers[i].value + 7) == 0) {
+				return 0;
+			}
 			break;
 		}
 	}
 
-	if (!auth_header) {
-		LOG_WRN("No Authorization header found");
-		return -EACCES;
-	}
-
-	if (strncasecmp(auth_header, "Basic ", 6) != 0) {
-		LOG_WRN("Authorization header is not Basic auth");
-		return -EACCES;
-	}
-
-	rc = base64_decode((uint8_t *)credentials, sizeof(credentials) - 1,
-			   &credentials_len, (const uint8_t *)auth_header + 6,
-			   strlen(auth_header + 6));
-	if (rc != 0) {
-		LOG_ERR("Failed to decode Basic auth credentials: %d", rc);
-		return -EACCES;
-	}
-
-	credentials[credentials_len] = '\0';
-
-	colon_pos = strchr(credentials, ':');
-	if (!colon_pos) {
-		LOG_WRN("Invalid Basic auth credentials format");
-		return -EACCES;
-	}
-
-	*colon_pos = '\0';
-	strncpy(username, credentials, sizeof(username) - 1);
-	username[sizeof(username) - 1] = '\0';
-	strncpy(password, colon_pos + 1, sizeof(password) - 1);
-	password[sizeof(password) - 1] = '\0';
-
-	rc = openjbod_auth_verify_credentials(username, password);
-	if (rc != 0) {
-		LOG_WRN("Authentication failed for user: %s", username);
-		return -EACCES;
-	}
-
-	LOG_DBG("Authentication successful for user: %s", username);
-	return 0;
+	return -EACCES;
 }
 
 void http_send_auth_required_response(struct http_response_ctx *response_ctx)
 {
-	static const char auth_body[] = "Unauthorized";
-	static const struct http_header auth_headers[] = {
-		{"WWW-Authenticate", "Basic realm=\"OpenJBOD\", charset=\"UTF-8\""},
-		{"Content-Type", "text/plain"},
+	/* 401 without WWW-Authenticate: no browser popup; clients (and the SPA) treat
+	 * it as "not logged in". Scripts authenticate with a bearer API token.
+	 */
+	static const char body[] = "{\"error\":\"unauthorized\"}";
+	static const struct http_header headers[] = {
+		{"Content-Type", "application/json"},
 	};
 
 	response_ctx->status = HTTP_401_UNAUTHORIZED;
-	response_ctx->headers = auth_headers;
-	response_ctx->header_count = ARRAY_SIZE(auth_headers);
-	response_ctx->body = (const uint8_t *)auth_body;
-	response_ctx->body_len = strlen(auth_body);
+	response_ctx->headers = headers;
+	response_ctx->header_count = ARRAY_SIZE(headers);
+	response_ctx->body = (const uint8_t *)body;
+	response_ctx->body_len = strlen(body);
+	response_ctx->final_chunk = true;
+}
+
+void http_send_login_redirect(struct http_response_ctx *response_ctx)
+{
+	static const char body[] = "Redirecting to /login";
+	static const struct http_header headers[] = {
+		{"Location", "/login"},
+		{"Content-Type", "text/plain"},
+	};
+
+	response_ctx->status = HTTP_302_FOUND;
+	response_ctx->headers = headers;
+	response_ctx->header_count = ARRAY_SIZE(headers);
+	response_ctx->body = (const uint8_t *)body;
+	response_ctx->body_len = strlen(body);
 	response_ctx->final_chunk = true;
 }

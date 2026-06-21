@@ -10,6 +10,7 @@
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/drivers/hwinfo.h>
 #include <zephyr/logging/log.h>
+#include "eeprom_mac.h"
 
 LOG_MODULE_REGISTER(eeprom_mac, LOG_LEVEL_INF);
 
@@ -19,24 +20,6 @@ LOG_MODULE_REGISTER(eeprom_mac, LOG_LEVEL_INF);
 
 static const struct device *eeprom_dev = DEVICE_DT_GET(DT_NODELABEL(eeprom));
 static const struct device *i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c0));
-
-/**
- * Check if EEPROM is present on I2C bus
- * Returns true if device responds to its address
- */
-static bool eeprom_is_present(void)
-{
-	uint8_t dummy_data;
-	int ret;
-
-	if (!device_is_ready(i2c_dev)) {
-		return false;
-	}
-
-	/* Try a simple read to see if device ACKs its address */
-	ret = i2c_read(i2c_dev, &dummy_data, 1, EEPROM_I2C_ADDR);
-	return (ret == 0);
-}
 
 /**
  * Generate LAA (Locally Administered Address) MAC from board unique ID
@@ -89,7 +72,7 @@ int read_mac_address(uint8_t *mac_addr)
 
 	/* Check for MACROM on I2C bus (any I2C errors during this check are expected on boards without MACROM) */
 	LOG_INF("Checking for MACROM on I2C bus...");
-	if (!eeprom_is_present()) {
+	if (!eeprom_24aa025e_present(i2c_dev)) {
 		LOG_INF("No MACROM detected on I2C bus - board revision likely lacks onboard EEPROM");
 		goto fallback_laa;
 	}

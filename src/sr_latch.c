@@ -20,6 +20,9 @@ LOG_MODULE_REGISTER(sr_latch, LOG_LEVEL_DBG);
 #define LATCH_RESET_PIN 13 /* GPIO13 - LRESET */
 #define LATCH_OUT_PIN 15   /* GPIO15 - LOUT */
 
+/* Width of the set/reset pulse: long enough for the latch to settle. */
+#define SR_LATCH_PULSE_MS 10
+
 /* GPIO device */
 static const struct device *gpio_dev;
 
@@ -65,7 +68,7 @@ void sr_latch_set_on(void)
 {
 	gpio_pin_set(gpio_dev, LATCH_SET_PIN, 1);
 	gpio_pin_set(gpio_dev, LATCH_RESET_PIN, 0);
-	k_msleep(10);
+	k_msleep(SR_LATCH_PULSE_MS);
 	gpio_pin_set(gpio_dev, LATCH_SET_PIN, 0);
 	sr_latch_state = true;
 	LOG_INF("SR latch turned ON");
@@ -75,7 +78,7 @@ void sr_latch_set_off(void)
 {
 	gpio_pin_set(gpio_dev, LATCH_SET_PIN, 0);
 	gpio_pin_set(gpio_dev, LATCH_RESET_PIN, 1);
-	k_msleep(10);
+	k_msleep(SR_LATCH_PULSE_MS);
 	gpio_pin_set(gpio_dev, LATCH_RESET_PIN, 0);
 	sr_latch_state = false;
 	LOG_INF("SR latch turned OFF");

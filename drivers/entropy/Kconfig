@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+
+config ENTROPY_RPI_PICO_ROSC
+	bool "RP2040 ROSC entropy driver"
+	default y
+	depends on DT_HAS_RASPBERRYPI_PICO_ROSC_ENTROPY_ENABLED
+	select ENTROPY_HAS_DRIVER
+	help
+	  Hardware entropy from the RP2040 ring oscillator (ROSC RANDOMBIT),
+	  von Neumann debiased and fed into Zephyr's CSPRNG. Provides real
+	  randomness for sys_csrand_get() (password salts, web-session ids),
+	  replacing CONFIG_TEST_RANDOM_GENERATOR.

@@ -1,0 +1,37 @@
+/*
+ * Devicetree overlay for the MCUboot image.
+ *  - Apply the OpenJBOD 16 MB A/B partition layout so the bootloader and the app
+ *    agree on slot0/slot1 geometry.
+ *  - Run MCUboot itself from boot_partition (the board variant points
+ *    code-partition at slot0, which is right for the app but not the bootloader).
+ *  - Route the console to the OpenJBOD UART pins (GP16/GP17) so the bootloader
+ *    banner reaches the board's serial console.
+ */
+
+#include <zephyr/dt-bindings/pinctrl/rpi-pico-rp2040-pinctrl.h>
+#include "../boards/openjbod-partitions-mcuboot.dtsi"
+
+/ {
+	chosen {
+		zephyr,code-partition = &boot_partition;
+	};
+};
+
+&pinctrl {
+	uart0_openjbod: uart0_openjbod {
+		group1 {
+			pinmux = <UART0_TX_P16>;
+		};
+		group2 {
+			pinmux = <UART0_RX_P17>;
+			input-enable;
+		};
+	};
+};
+
+&uart0 {
+	current-speed = <115200>;
+	status = "okay";
+	pinctrl-0 = <&uart0_openjbod>;
+	pinctrl-names = "default";
+};

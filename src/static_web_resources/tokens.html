@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenJBOD - API Tokens</title>
+    <link rel="stylesheet" href="/style.css">
+    <script src="/tokens.js"></script>
+    <script src="/common.js"></script>
+</head>
+<body>
+    <div class="container">
+        <nav class="menu">
+            <ul>
+                <p class="menu-heading">OpenJBOD</p>
+                <li><a href="/">Overview</a></li>
+                <li><a href="/about">About</a></li>
+                <p class="menu-heading">Settings</p>
+                <li><a href="/network">Network</a></li>
+                <li><a href="/power">Power</a></li>
+                <li><a href="/http">HTTP</a></li>
+                <li><a href="/environment">Environment</a></li>
+                <li><a href="/console">Console</a></li>
+                <li><a href="/users">Users</a></li>
+                <li><a href="/tokens" class="active">API Tokens</a></li>
+                <li><a href="/firmware">Firmware</a></li>
+                <li><a href="/reset">Reset</a></li>
+                <li><a href="#" id="logout-link">Log out</a></li>
+            </ul>
+        </nav>
+        <main class="content">
+            <p class="heading">Settings - API Tokens</p>
+            <div class="row">
+                <div class="grid-2">
+                    <p class="heading">Create a token</p>
+                    <form id="token-form">
+                        <div class="form-row">
+                            <div class="form-label"><b>Label</b></div>
+                            <div class="form-input">
+                                <input id="token-label" type="text" placeholder="e.g. backup-script"
+                                       maxlength="31" />
+                            </div>
+                        </div>
+                        <hr />
+                        <button type="submit">Create token</button>
+                    </form>
+                    <div id="new-token" style="display:none;">
+                        <p><b>New token</b> &mdash; copy it now, it will not be shown again:</p>
+                        <pre id="new-token-value" style="white-space:pre-wrap;word-break:break-all;"></pre>
+                    </div>
+
+                    <p class="heading">Existing tokens</p>
+                    <table>
+                        <thead><tr><th>ID</th><th>Label</th><th></th></tr></thead>
+                        <tbody id="token-list">
+                            <tr><td colspan="3">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="grid-2">
+                    <p class="heading">Legend</p>
+                    <fieldset>
+                        <p>API tokens authenticate programmatic requests without a username and
+                           password. Send one as an HTTP header:
+                           <code>Authorization: Bearer &lt;token&gt;</code>.</p>
+                        <p>The full token is shown <b>once</b> at creation; only a hash is stored on
+                           the device, so a lost token cannot be recovered &mdash; revoke it and
+                           create a new one.</p>
+                        <p>Tokens persist across reboots and remain valid until revoked here.</p>
+                    </fieldset>
+                </div>
+            </div>
+        </main>
+    </div>
+</body>
+</html>

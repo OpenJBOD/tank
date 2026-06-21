@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <strings.h>
@@ -112,18 +113,39 @@ static int convert_binary_to_hex(const uint8_t *binary_data, size_t binary_len,
 	return 0;
 }
 
-static int store_certificate_in_settings(const uint8_t *cert_data, size_t cert_len)
+/* Convert binary DER to a freshly heap-allocated hex string, capped at `max_hex`
+ * (including the NUL). Returns NULL on overflow or allocation failure. */
+static char *alloc_hex(const uint8_t *data, size_t len, size_t max_hex)
 {
-	struct openjbod_settings *settings = openjbod_settings_get();
-	int ret = convert_binary_to_hex(cert_data, cert_len,
-				      settings->http.custom_certificate,
-				      sizeof(settings->http.custom_certificate));
-	if (ret < 0) {
-		LOG_ERR("Failed to convert certificate to hex: %d", ret);
-		return ret;
+	size_t hex_len = len * 2 + 1;
+
+	if (hex_len > max_hex) {
+		LOG_ERR("Data too large: need %zu hex chars, max %zu", hex_len, max_hex);
+		return NULL;
 	}
 
-	ret = openjbod_settings_save_all();
+	char *hex = malloc(hex_len);
+	if (hex == NULL) {
+		LOG_ERR("Out of memory for %zu hex chars", hex_len);
+		return NULL;
+	}
+	if (convert_binary_to_hex(data, len, hex, hex_len) < 0) {
+		free(hex);
+		return NULL;
+	}
+	return hex;
+}
+
+static int store_certificate_in_settings(const uint8_t *cert_data, size_t cert_len)
+{
+	char *hex = alloc_hex(cert_data, cert_len, CERTIFICATE_HEX_MAX_LEN);
+	if (hex == NULL) {
+		return -ENOMEM;
+	}
+
+	openjbod_settings_take_custom_certificate(hex);  /* takes ownership */
+
+	int ret = openjbod_settings_save_all();
 	if (ret < 0) {
 		LOG_ERR("Failed to save settings with certificate: %d", ret);
 		return ret;
@@ -135,16 +157,14 @@ static int store_certificate_in_settings(const uint8_t *cert_data, size_t cert_l
 
 static int store_private_key_in_settings(const uint8_t *key_data, size_t key_len)
 {
-	struct openjbod_settings *settings = openjbod_settings_get();
-	int ret = convert_binary_to_hex(key_data, key_len,
-				      settings->http.custom_private_key,
-				      sizeof(settings->http.custom_private_key));
-	if (ret < 0) {
-		LOG_ERR("Failed to convert private key to hex: %d", ret);
-		return ret;
+	char *hex = alloc_hex(key_data, key_len, PRIVATE_KEY_HEX_MAX_LEN);
+	if (hex == NULL) {
+		return -ENOMEM;
 	}
 
-	ret = openjbod_settings_save_all();
+	openjbod_settings_take_custom_private_key(hex);  /* takes ownership */
+
+	int ret = openjbod_settings_save_all();
 	if (ret < 0) {
 		LOG_ERR("Failed to save settings with private key: %d", ret);
 		return ret;
@@ -161,11 +181,16 @@ static int certificates_upload_handler(struct http_client_ctx *client, enum http
 	static char response_buffer[512];
 	static uint8_t upload_buffer[8192];
 	static size_t upload_cursor;
+	/* The accumulation buffer above is shared across all clients and the server
+	 * services them from one thread, so interleaved chunked uploads would
+	 * corrupt each other. Serialize by tracking the owning client.
+	 */
+	static struct http_client_ctx *upload_owner;
 
 	ARG_UNUSED(user_data);
 
 	if (status == HTTP_SERVER_DATA_FINAL) {
-		int auth_result = http_basic_auth_check(client);
+		int auth_result = http_check_auth(client);
 		if (auth_result != 0) {
 			LOG_WRN("Authentication failed for certificate upload endpoint");
 			http_send_auth_required_response(response_ctx);
@@ -175,6 +200,23 @@ static int certificates_upload_handler(struct http_client_ctx *client, enum http
 
 	if (status == HTTP_SERVER_DATA_ABORTED) {
 		upload_cursor = 0;
+		upload_owner = NULL;
+		return 0;
+	}
+
+	/* Claim the buffer at the start of an upload; reject chunks that belong to a
+	 * different, concurrent upload. (At cursor==0 any stale owner is replaced.)
+	 */
+	if (upload_cursor == 0) {
+		upload_owner = client;
+	} else if (upload_owner != client) {
+		LOG_WRN("Rejected concurrent certificate upload");
+		snprintf(response_buffer, sizeof(response_buffer),
+			 "{\"success\":false,\"message\":\"Another certificate upload is in progress\"}");
+		response_ctx->status = HTTP_409_CONFLICT;
+		response_ctx->body = response_buffer;
+		response_ctx->body_len = strlen(response_buffer);
+		response_ctx->final_chunk = true;
 		return 0;
 	}
 
