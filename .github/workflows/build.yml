@@ -125,17 +125,17 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ github.event.release.upload_url }}
-          asset_path: artifacts/tank-*-full.uf2
+          asset_path: artifacts/tank-${{ github.event.release.tag_name }}-full.uf2
           asset_name: tank-${{ github.event.release.tag_name }}.uf2
           asset_content_type: application/octet-stream
 
-      - name: Upload release asset
+      - name: Upload signed .bin
         if: github.event_name == 'release'
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ github.event.release.upload_url }}
-          asset_path: artifacts/tank-*-update.bin
+          asset_path: artifacts/tank-${{ github.event.release.tag_name }}-update.bin
           asset_name: tank-${{ github.event.release.tag_name }}.bin
           asset_content_type: application/octet-stream
