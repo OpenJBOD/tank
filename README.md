@@ -11,17 +11,6 @@ Tank supports both HTTP and HTTPS (albeit HTTPS is a bit slower, at the time of 
 
 The name **Tank** is a reference to Oracle/Sun documentation for ZFS naming example storage pools 'tank'.
 
-## Features not yet implemented
-
-At this time, the following features still need to be implemented:
-- [x] External DS18B20 Temperature Sensor — optional probe on the GPIO11 pin
-      header; detected at boot and user-selectable as the primary temperature
-      source (with automatic fallback). See `api.md` and `TECH_DEBT.md` (web UI
-      still owed).
-- [x] UART over USB for debugging/logging — USB CDC-ACM console runs a second
-      Zephyr shell alongside the hardware UART; either console can be disabled in
-      settings. See `TECH_DEBT.md` (web UI toggle still owed).
-
 ## Development Environment Setup
 
 The Tank firmware is built on the Zephyr RTOS. The steps below describe how to create a local development environment on an Ubuntu/Debian host. Equivalent packages exist for other Linux distributions; Windows and macOS users can adapt the instructions using Zephyr's official host setup guide. This assumes you do not have any pre-requisites installed.
