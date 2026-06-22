@@ -10,7 +10,6 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/shell/shell.h>
-#include <zephyr/random/random.h>
 #include <stdlib.h>
 
 #include "sr_latch.h"
@@ -212,29 +211,6 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
-/* Dump 32 cryptographically-random bytes (sanity-check the CSPRNG/entropy). */
-static int cmd_rng(const struct shell *sh, size_t argc, char **argv)
-{
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
-
-	uint8_t buf[32];
-	int rc = sys_csrand_get(buf, sizeof(buf));
-
-	if (rc != 0) {
-		shell_error(sh, "sys_csrand_get failed: %d", rc);
-		return rc;
-	}
-
-	char hex[sizeof(buf) * 2 + 1];
-
-	for (size_t i = 0; i < sizeof(buf); i++) {
-		snprintf(&hex[i * 2], 3, "%02x", buf[i]);
-	}
-	shell_print(sh, "csrand: %s", hex);
-	return 0;
-}
-
 /* --- registration ------------------------------------------------------- */
 SHELL_STATIC_SUBCMD_SET_CREATE(tank_subcmds,
 	SHELL_CMD_ARG(power,  NULL, "ATX power: on|off|status", cmd_power, 1, 1),
@@ -243,7 +219,6 @@ SHELL_STATIC_SUBCMD_SET_CREATE(tank_subcmds,
 	SHELL_CMD_ARG(tempsrc, NULL, "primary temp source: <onboard|header>", cmd_tempsrc, 1, 1),
 	SHELL_CMD_ARG(console, NULL, "console toggle: <uart|usb> <on|off>", cmd_console, 1, 2),
 	SHELL_CMD(status,     NULL, "summarize device status", cmd_status),
-	SHELL_CMD(rng,        NULL, "dump 32 CSPRNG bytes (entropy sanity check)", cmd_rng),
 	SHELL_SUBCMD_SET_END
 );
 SHELL_CMD_REGISTER(tank, &tank_subcmds, "OpenJBOD Tank debug commands", NULL);
