@@ -166,7 +166,7 @@ int temperature_read(struct temperature_data *temp_data)
 	/* Read external (header) DS18B20 temperature. Always attempt it so the
 	 * valid flag reflects live presence (handles unplug after boot).
 	 */
-	if (ds18b20_ext_dev != NULL && device_is_ready(ds18b20_ext_dev)) {
+	if (ext_present && ds18b20_ext_dev != NULL && device_is_ready(ds18b20_ext_dev)) { {
 		ret = sensor_sample_fetch(ds18b20_ext_dev);
 		if (ret == 0) {
 			ret = sensor_channel_get(ds18b20_ext_dev, SENSOR_CHAN_AMBIENT_TEMP, &temp_val);
