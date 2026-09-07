@@ -148,8 +148,85 @@
                         </div>
                         
                         <hr />
+                        <div class="form-row">
+                            <div class="form-label"><b>Fan hardware (EMC2301)</b></div>
+                            <div class="form-input">Defaults suit any standard 4-wire fan. Change only for unusual fans, or run the characterization below.</div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-label">
+                                <label for="fan_pwm_base_hz">PWM frequency</label>
+                            </div>
+                            <div class="form-input">
+                                <select id="fan_pwm_base_hz" name="fan_pwm_base_hz">
+                                    <option value="26000">26 kHz (4-wire fan standard)</option>
+                                    <option value="19531">19.5 kHz</option>
+                                    <option value="4882">4.9 kHz</option>
+                                    <option value="2441">2.4 kHz</option>
+                                </select>
+                                / <input type="number" id="fan_pwm_divide" name="fan_pwm_divide" min="1" max="255" step="1" style="width:5em" />
+                                <span id="fan_pwm_effective"></span>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-label">
+                                <label for="fan_tach_pulses_per_rev">Tach pulses per revolution</label>
+                            </div>
+                            <div class="form-input">
+                                <select id="fan_tach_pulses_per_rev" name="fan_tach_pulses_per_rev">
+                                    <option value="1">1 (3 edges)</option>
+                                    <option value="2">2 (5 edges, standard 4-wire fan)</option>
+                                    <option value="3">3 (7 edges)</option>
+                                    <option value="4">4 (9 edges)</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-label">
+                                <label for="fan_tach_edges">Tach edges sampled</label>
+                            </div>
+                            <div class="form-input">
+                                <select id="fan_tach_edges" name="fan_tach_edges">
+                                    <option value="0">Auto (2 x pulses + 1)</option>
+                                    <option value="3">3 (reads slow fans, less resolution)</option>
+                                    <option value="5">5</option>
+                                    <option value="7">7</option>
+                                    <option value="9">9</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-label">
+                                <label for="fan_tach_range">Tach range</label>
+                            </div>
+                            <div class="form-input">
+                                <select id="fan_tach_range" name="fan_tach_range">
+                                    <option value="1">500 RPM minimum (x1)</option>
+                                    <option value="2">1000 RPM minimum (x2)</option>
+                                    <option value="4">2000 RPM minimum (x4)</option>
+                                    <option value="8">4000 RPM minimum (x8)</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-label">
+                                <label for="fan_min_drive_percent">Minimum drive (%)</label>
+                            </div>
+                            <div class="form-input">
+                                <input type="number" id="fan_min_drive_percent" name="fan_min_drive_percent" min="0" max="100" step="1" />
+                            </div>
+                        </div>
+                        <hr />
                         <button type="submit">Save Environment Settings</button>
                     </form>
+                    <p class="heading">Fan characterization</p>
+                    <p>Sweeps the fan through its duty range (about one minute, the fan runs at full speed briefly), measures the response and stores the PWM frequency, tach range and minimum drive. Requires ATX power on.</p>
+                    <button type="button" id="fan-calibrate-btn">Characterize fan</button>
+                    <button type="button" id="fan-cal-abort-btn">Abort</button>
+                    <button type="button" id="fan-hw-reset-btn">Reset fan hardware defaults</button>
+                    <p id="fan-cal-status">Loading...</p>
+                    <table id="fan-cal-table" style="display:none">
+                        <tr><th>Duty</th><th>RPM</th></tr>
+                    </table>
                 </div>
                 <div class="grid-2">
                     <p class="heading">Current Temperatures</p>
@@ -158,6 +235,15 @@
                         <tr><th>Header</th><td id="temp-header">Loading...</td></tr>
                         <tr><th>RP2040 die</th><td id="temp-rp2040">Loading...</td></tr>
                         <tr><th>Active source</th><td id="temp-active">Loading...</td></tr>
+                    </table>
+                    <p class="heading">Fan status</p>
+                    <table>
+                        <tr><th>Speed</th><td id="fan-rpm">Loading...</td></tr>
+                        <tr><th>Drive</th><td id="fan-drive">Loading...</td></tr>
+                        <tr><th>Tach count</th><td id="fan-tach">Loading...</td></tr>
+                        <tr><th>PWM</th><td id="fan-pwm">Loading...</td></tr>
+                        <tr><th>Flags</th><td id="fan-flags">Loading...</td></tr>
+                        <tr><th>Control</th><td id="fan-control">Loading...</td></tr>
                     </table>
                     <p class="heading">Legend</p>
                     <fieldset>
@@ -176,6 +262,11 @@
                         <p><b>Fan Curve</b> - Five temperature/fan speed points that define the fan response curve. The system uses linear interpolation between points to determine fan speed at any temperature.</p>
                         <p><b>Temperature Range</b> - Valid range is -40°C to +125°C (DS18B20 sensor limits).</p>
                         <p><b>Fan Speed Range</b> - 0% to 100% where 0% is off and 100% is maximum speed.</p>
+                        <p><b>PWM frequency</b> - Frequency of the fan's PWM control input. Intel-spec 4-wire fans expect 21-28 kHz (use 26 kHz). Some older or 3-wire-style fans respond better to lower frequencies.</p>
+                        <p><b>Tach pulses per revolution</b> - Standard fans emit 2 pulses per revolution. This cannot be detected automatically; if the reported RPM is exactly double or half the fan's rating, adjust it here.</p>
+                        <p><b>Tach edges sampled</b> - How many tach edges the controller times per measurement. Auto uses the datasheet value for the pulses-per-revolution setting; 3 edges halves the measurement window so fans idling below ~480 RPM still read, at some cost in resolution. Characterization picks this for you.</p>
+                        <p><b>Tach range</b> - Lowest speed the controller can report. Higher settings improve resolution for fast fans but cannot read slow ones. Characterization picks this for you.</p>
+                        <p><b>Minimum drive</b> - The fan curve never drives a running fan below this level (0% still means off), preventing stalls at low duty.</p>
                     </fieldset>
                 </div>
             </div>

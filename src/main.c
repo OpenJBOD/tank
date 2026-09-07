@@ -1093,7 +1093,9 @@ int main(void)
 		/* Don't return error - continue without temperature sensors */
 	}
 
-	ret = emc2301_init();
+	struct emc2301_config fan_hw_cfg;
+	fan_control_hw_config_from_settings(&openjbod_settings_get()->environment, &fan_hw_cfg);
+	ret = emc2301_init(&fan_hw_cfg);
 	if (ret < 0) {
 		LOG_WRN("EMC2301 fan controller initialization failed: %d", ret);
 		/* Don't return error - continue without fan controller */

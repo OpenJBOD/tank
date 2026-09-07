@@ -59,7 +59,15 @@ LOG_MODULE_REGISTER(tank_settings, LOG_LEVEL_INF);
 			{40.0f, 40},   /* 40°C: 40% fan speed */                                      \
 			{50.0f, 70},   /* 50°C: 70% fan speed */                                      \
 			{60.0f, 100}   /* 60°C and above: 100% fan speed */                            \
-		}                                                                               \
+		},                                                                              \
+		.fan_pwm_base_hz = 26000,        /* Intel 4-wire spec: 21-28 kHz */              \
+		.fan_pwm_divide = 1,                                                            \
+		.fan_tach_pulses_per_rev = 2,    /* standard 4-wire fan */                        \
+		.fan_tach_edges = 0,             /* auto: 2*ppr+1 = 5 edges */                    \
+		.fan_tach_range = 1,             /* 500 RPM floor, widest measurement range */   \
+		.fan_min_drive_percent = 0,                                                     \
+		.fan_cal_min_spin_percent = 0,   /* 0 = never calibrated */                      \
+		.fan_cal_max_rpm = 0                                                            \
 	},                                                                                  \
 	.console = {                                                                        \
 		.uart_enabled = true,                                                           \
@@ -230,6 +238,14 @@ static const struct sfield environment_fields[] = {
 	SF_BLOB_ENTRY(environment, fan_update_interval_ms),
 	SF_BLOB_ENTRY(environment, fan_hysteresis_percent),
 	SF_BLOB_ENTRY(environment, primary_temp_source),
+	SF_BLOB_ENTRY(environment, fan_pwm_base_hz),
+	SF_BLOB_ENTRY(environment, fan_pwm_divide),
+	SF_BLOB_ENTRY(environment, fan_tach_pulses_per_rev),
+	SF_BLOB_ENTRY(environment, fan_tach_edges),
+	SF_BLOB_ENTRY(environment, fan_tach_range),
+	SF_BLOB_ENTRY(environment, fan_min_drive_percent),
+	SF_BLOB_ENTRY(environment, fan_cal_min_spin_percent),
+	SF_BLOB_ENTRY(environment, fan_cal_max_rpm),
 };
 
 static const struct sfield console_fields[] = {
@@ -1181,10 +1197,35 @@ int openjbod_settings_set_environment(const struct environment_settings *environ
 	struct environment_settings *cur = &current_settings.environment;
 	int rc;
 
+	/* Fan hardware fields: validate once here so every caller (HTTP, shell,
+	 * calibration) is checked the same way. */
+	if (environment->fan_pwm_divide == 0 ||
+	    environment->fan_tach_pulses_per_rev < 1 || environment->fan_tach_pulses_per_rev > 4 ||
+	    (environment->fan_tach_edges != 0 && environment->fan_tach_edges != 3 &&
+	     environment->fan_tach_edges != 5 && environment->fan_tach_edges != 7 &&
+	     environment->fan_tach_edges != 9) ||
+	    (environment->fan_tach_range != 1 && environment->fan_tach_range != 2 &&
+	     environment->fan_tach_range != 4 && environment->fan_tach_range != 8) ||
+	    environment->fan_min_drive_percent > 100 ||
+	    environment->fan_cal_min_spin_percent > 100) {
+		LOG_ERR("Invalid fan hardware settings (divide %u, ppr %u, range %u, min drive %u)",
+			environment->fan_pwm_divide, environment->fan_tach_pulses_per_rev,
+			environment->fan_tach_range, environment->fan_min_drive_percent);
+		return -EINVAL;
+	}
+
 	if ((rc = save_blob_if_changed("environment/use_external_fan_control", &environment->use_external_fan_control, &cur->use_external_fan_control, sizeof(cur->use_external_fan_control))) != 0 ||
 	    (rc = save_blob_if_changed("environment/fan_update_interval_ms", &environment->fan_update_interval_ms, &cur->fan_update_interval_ms, sizeof(cur->fan_update_interval_ms))) != 0 ||
 	    (rc = save_blob_if_changed("environment/fan_hysteresis_percent", &environment->fan_hysteresis_percent, &cur->fan_hysteresis_percent, sizeof(cur->fan_hysteresis_percent))) != 0 ||
-	    (rc = save_blob_if_changed("environment/primary_temp_source", &environment->primary_temp_source, &cur->primary_temp_source, sizeof(cur->primary_temp_source))) != 0) {
+	    (rc = save_blob_if_changed("environment/primary_temp_source", &environment->primary_temp_source, &cur->primary_temp_source, sizeof(cur->primary_temp_source))) != 0 ||
+	    (rc = save_blob_if_changed("environment/fan_pwm_base_hz", &environment->fan_pwm_base_hz, &cur->fan_pwm_base_hz, sizeof(cur->fan_pwm_base_hz))) != 0 ||
+	    (rc = save_blob_if_changed("environment/fan_pwm_divide", &environment->fan_pwm_divide, &cur->fan_pwm_divide, sizeof(cur->fan_pwm_divide))) != 0 ||
+	    (rc = save_blob_if_changed("environment/fan_tach_pulses_per_rev", &environment->fan_tach_pulses_per_rev, &cur->fan_tach_pulses_per_rev, sizeof(cur->fan_tach_pulses_per_rev))) != 0 ||
+	    (rc = save_blob_if_changed("environment/fan_tach_edges", &environment->fan_tach_edges, &cur->fan_tach_edges, sizeof(cur->fan_tach_edges))) != 0 ||
+	    (rc = save_blob_if_changed("environment/fan_tach_range", &environment->fan_tach_range, &cur->fan_tach_range, sizeof(cur->fan_tach_range))) != 0 ||
+	    (rc = save_blob_if_changed("environment/fan_min_drive_percent", &environment->fan_min_drive_percent, &cur->fan_min_drive_percent, sizeof(cur->fan_min_drive_percent))) != 0 ||
+	    (rc = save_blob_if_changed("environment/fan_cal_min_spin_percent", &environment->fan_cal_min_spin_percent, &cur->fan_cal_min_spin_percent, sizeof(cur->fan_cal_min_spin_percent))) != 0 ||
+	    (rc = save_blob_if_changed("environment/fan_cal_max_rpm", &environment->fan_cal_max_rpm, &cur->fan_cal_max_rpm, sizeof(cur->fan_cal_max_rpm))) != 0) {
 		return rc;
 	}
 
@@ -1208,6 +1249,23 @@ int openjbod_settings_set_environment(const struct environment_settings *environ
 
 	LOG_INF("Environment settings saved");
 	return 0;
+}
+
+int openjbod_settings_reset_fan_hw(void)
+{
+	struct environment_settings env = current_settings.environment;
+	const struct environment_settings *def = &default_settings.environment;
+
+	env.fan_pwm_base_hz = def->fan_pwm_base_hz;
+	env.fan_pwm_divide = def->fan_pwm_divide;
+	env.fan_tach_pulses_per_rev = def->fan_tach_pulses_per_rev;
+	env.fan_tach_edges = def->fan_tach_edges;
+	env.fan_tach_range = def->fan_tach_range;
+	env.fan_min_drive_percent = def->fan_min_drive_percent;
+	env.fan_cal_min_spin_percent = def->fan_cal_min_spin_percent;
+	env.fan_cal_max_rpm = def->fan_cal_max_rpm;
+
+	return openjbod_settings_set_environment(&env);
 }
 
 int openjbod_settings_set_console(const struct console_settings *console)

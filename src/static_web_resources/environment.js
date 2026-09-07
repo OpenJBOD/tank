@@ -39,6 +39,7 @@ async function fetchEnvironmentSettings()
             document.getElementById("external_fan_control").checked = env.use_external_fan_control || false;
             document.getElementById("fan_update_interval").value = env.fan_update_interval_ms || 5000;
             document.getElementById("fan_hysteresis").value = env.fan_hysteresis_percent || 5;
+            populateFanHwFields(env);
             
             // Fan curve points
             if (env.fan_curve && Array.isArray(env.fan_curve)) {
@@ -64,8 +65,44 @@ async function fetchEnvironmentSettings()
     }
 }
 
+function populateFanHwFields(env) {
+    document.getElementById("fan_pwm_base_hz").value = String(env.fan_pwm_base_hz ?? 26000);
+    document.getElementById("fan_pwm_divide").value = env.fan_pwm_divide ?? 1;
+    document.getElementById("fan_tach_pulses_per_rev").value = String(env.fan_tach_pulses_per_rev ?? 2);
+    document.getElementById("fan_tach_edges").value = String(env.fan_tach_edges ?? 0);
+    document.getElementById("fan_tach_range").value = String(env.fan_tach_range ?? 1);
+    document.getElementById("fan_min_drive_percent").value = env.fan_min_drive_percent ?? 0;
+    updateEffectivePwm();
+}
+
+function updateEffectivePwm() {
+    const base = parseInt(document.getElementById("fan_pwm_base_hz").value, 10) || 26000;
+    const div = parseInt(document.getElementById("fan_pwm_divide").value, 10) || 1;
+    document.getElementById("fan_pwm_effective").textContent = `= ${Math.round(base / div)} Hz`;
+}
+
+function readFanHwFields() {
+    const div = parseInt(document.getElementById("fan_pwm_divide").value, 10);
+    const minDrive = parseInt(document.getElementById("fan_min_drive_percent").value, 10);
+    if (isNaN(div) || div < 1 || div > 255) {
+        throw new Error("PWM divider must be between 1 and 255");
+    }
+    if (isNaN(minDrive) || minDrive < 0 || minDrive > 100) {
+        throw new Error("Minimum drive must be between 0% and 100%");
+    }
+    return {
+        fan_pwm_base_hz: parseInt(document.getElementById("fan_pwm_base_hz").value, 10),
+        fan_pwm_divide: div,
+        fan_tach_pulses_per_rev: parseInt(document.getElementById("fan_tach_pulses_per_rev").value, 10),
+        fan_tach_edges: parseInt(document.getElementById("fan_tach_edges").value, 10),
+        fan_tach_range: parseInt(document.getElementById("fan_tach_range").value, 10),
+        fan_min_drive_percent: minDrive
+    };
+}
+
 function setDefaultValues() {
     document.getElementById("external_fan_control").checked = false;
+    populateFanHwFields({});
     document.getElementById("fan_update_interval").value = 5000;
     document.getElementById("fan_hysteresis").value = 5;
 
@@ -155,13 +192,13 @@ async function saveEnvironmentSettings(formData)
         const primarySource = parseInt(formData.primary_temp_source, 10) === 1 ? 1 : 0;
 
         const settingsData = {
-            environment: {
+            environment: Object.assign({
                 primary_temp_source: primarySource,
                 use_external_fan_control: externalFanControl,
                 fan_update_interval_ms: updateInterval,
                 fan_hysteresis_percent: hysteresis,
                 fan_curve: curve
-            }
+            }, readFanHwFields())
         };
         
         const response = await fetch("/api/settings", {
@@ -272,7 +309,133 @@ async function fetchTemperatures() {
     }
 }
 
+async function fetchFanStatus() {
+    try {
+        const response = await fetch("/api/fan", { cache: "no-store" });
+        if (!response.ok) {
+            throw new Error(`Response status: ${response.status}`);
+        }
+        const f = await response.json();
+        document.getElementById("fan-rpm").textContent =
+            f.fan.tach_valid ? `${f.fan.rpm} RPM` : "no tach signal";
+        document.getElementById("fan-drive").textContent =
+            `${f.pwm.percent}% (duty ${f.pwm.duty}/255)`;
+        document.getElementById("fan-tach").textContent =
+            `${f.fan.tach_count} (${f.tach.pulses_per_rev} pulses/rev, ${f.tach.edges} edges, range x${f.tach.range}, floor ${f.tach.min_rpm} RPM)`;
+        document.getElementById("fan-pwm").textContent =
+            `${f.pwm.effective_hz} Hz (base ${f.pwm.base_hz} / ${f.pwm.divide})`;
+        const flags = ["stall", "spin_fail", "drive_fail", "watchdog"].filter(k => f.fan[k]);
+        document.getElementById("fan-flags").textContent = flags.length ? flags.join(", ") : "none";
+        document.getElementById("fan-control").textContent =
+            `${f.control.mode}, target ${f.control.target_percent}%, min drive ${f.control.min_drive_percent}%`;
+    } catch (error) {
+        console.error("Failed to fetch fan status:", error.message);
+    }
+}
+
+let calPollTimer = null;
+
+function renderCalStatus(st) {
+    const line = document.getElementById("fan-cal-status");
+    const table = document.getElementById("fan-cal-table");
+    let text = `${st.state}`;
+    if (st.state === "running" || st.state === "pending") {
+        text += ` - ${st.phase}, ${st.progress_percent}% (${Math.round(st.elapsed_ms / 1000)} s)`;
+    } else if (st.abort_reason) {
+        text += ` (${st.abort_reason})`;
+    }
+    const r = st.result || {};
+    if (st.state === "done" || st.state === "error" || st.state === "aborted") {
+        if (r.note) {
+            text += ` - ${r.note}`;
+        }
+        if (st.state === "done") {
+            const conf = ["low", "medium", "high"][r.confidence] || "?";
+            text += ` | PWM ${r.chosen_pwm_base_hz} Hz, ${r.chosen_edges} edges, range x${r.chosen_range}, starts at ${r.min_spin_percent}%, ` +
+                    `max ${r.max_rpm} RPM, confidence ${conf}`;
+            if (r.suggested_ppr !== r.assumed_ppr) {
+                text += ` | consider ${r.suggested_ppr} pulses/rev`;
+            }
+        }
+        if (Array.isArray(r.rpm_at) && r.tach_present) {
+            while (table.rows.length > 1) {
+                table.deleteRow(1);
+            }
+            r.rpm_at.forEach(([pct, rpm]) => {
+                const row = table.insertRow();
+                row.insertCell().textContent = `${pct}%`;
+                row.insertCell().textContent = `${rpm}`;
+            });
+            table.style.display = "";
+        } else {
+            table.style.display = "none";
+        }
+    }
+    line.textContent = text;
+}
+
+async function fetchCalStatus() {
+    try {
+        const response = await fetch("/api/fan/calibrate", { cache: "no-store" });
+        if (!response.ok) {
+            throw new Error(`Response status: ${response.status}`);
+        }
+        const st = await response.json();
+        renderCalStatus(st);
+        const active = st.state === "running" || st.state === "pending";
+        if (active && !calPollTimer) {
+            calPollTimer = setInterval(fetchCalStatus, 1000);
+        } else if (!active && calPollTimer) {
+            clearInterval(calPollTimer);
+            calPollTimer = null;
+            fetchEnvironmentSettings();  // pick up the values the run stored
+        }
+    } catch (error) {
+        console.error("Failed to fetch calibration status:", error.message);
+    }
+}
+
+async function postCalAction(action) {
+    try {
+        const response = await fetch("/api/fan/calibrate", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: `action=${action}`
+        });
+        const json = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(`${response.status} ${json.status || ""}`);
+        }
+        if (action === "reset") {
+            alert("Fan hardware settings reset to defaults.");
+            fetchEnvironmentSettings();
+        }
+        fetchCalStatus();
+    } catch (error) {
+        alert(`Fan ${action} failed: ${error.message}`);
+    }
+}
+
 window.addEventListener("DOMContentLoaded", (ev) => {
+    // Live fan status and any calibration in progress
+    fetchFanStatus();
+    setInterval(fetchFanStatus, 3000);
+    fetchCalStatus();
+
+    document.getElementById("fan-calibrate-btn").addEventListener("click", () => {
+        if (confirm("Run the fan characterization now? The fan will sweep to full speed for about a minute.")) {
+            postCalAction("start");
+        }
+    });
+    document.getElementById("fan-cal-abort-btn").addEventListener("click", () => postCalAction("abort"));
+    document.getElementById("fan-hw-reset-btn").addEventListener("click", () => {
+        if (confirm("Reset PWM frequency, tach settings and minimum drive to defaults?")) {
+            postCalAction("reset");
+        }
+    });
+    document.getElementById("fan_pwm_base_hz").addEventListener("change", updateEffectivePwm);
+    document.getElementById("fan_pwm_divide").addEventListener("input", updateEffectivePwm);
+
     // Load current environment settings on page load
     fetchEnvironmentSettings();
 

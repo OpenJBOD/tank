@@ -5,3 +5,4 @@
 extern struct http_resource_detail_dynamic temp_resource_detail;
 extern struct http_resource_detail_dynamic fan_resource_detail;
 extern struct http_resource_detail_dynamic fan_set_resource_detail;
+extern struct http_resource_detail_dynamic fan_calibrate_resource_detail;

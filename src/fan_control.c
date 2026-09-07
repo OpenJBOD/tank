@@ -4,9 +4,11 @@
  */
 
 #include "fan_control.h"
+#include "fan_calibrate.h"
 #include "temperature.h"
 #include "emc2301.h"
 #include "settings.h"
+#include "sr_latch.h"
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <math.h>
@@ -20,20 +22,32 @@ static struct {
 	k_tid_t thread_id;
 	bool running;
 	bool initialized;
+	bool calibrating;
+	bool auto_cal_requested;    /* first-boot characterization issued this boot */
 	float last_temperature;
 	uint8_t last_fan_percent;
 	bool increasing_direction;  /* Track direction for hysteresis */
 } fan_control_state = {
 	.running = false,
 	.initialized = false,
+	.calibrating = false,
+	.auto_cal_requested = false,
 	.last_temperature = 0.0f,
 	.last_fan_percent = 0,
 	.increasing_direction = true
 };
 
-/* Thread stack */
-#define FAN_CONTROL_STACK_SIZE 2048
+/* Woken early by fan_control_kick() (config change, calibration request). */
+static K_SEM_DEFINE(fan_wake, 0, 1);
+
+/* Thread stack (calibration + float logging + temperature reads run here) */
+#define FAN_CONTROL_STACK_SIZE 3072
 K_THREAD_STACK_DEFINE(fan_control_stack, FAN_CONTROL_STACK_SIZE);
+
+static void fan_control_wait(uint32_t interval_ms)
+{
+	(void)k_sem_take(&fan_wake, K_MSEC(interval_ms));
+}
 
 /**
  * Linear interpolation between two fan curve points
@@ -120,6 +134,15 @@ static void fan_control_thread_func(void *arg1, void *arg2, void *arg3)
 	while (fan_control_state.running) {
 		const struct openjbod_settings *settings = openjbod_settings_get();
 
+		/* A characterization run owns the PWM output; run it here so nothing
+		 * else in this loop fights it. */
+		if (fan_calibrate_pending()) {
+			fan_control_state.calibrating = true;
+			fan_calibrate_run();
+			fan_control_state.calibrating = false;
+			continue;
+		}
+
 		/* Always refresh the shared temperature cache (even under external fan
 		 * control) so /api/status and other readers never trigger a blocking
 		 * conversion themselves.
@@ -129,15 +152,33 @@ static void fan_control_thread_func(void *arg1, void *arg2, void *arg3)
 			temperature_cache_store(&temp_data);
 		}
 
+		/* First boot with no persisted characterization: run it once, but only
+		 * when the fan actually has power (ATX on). Retried on later loops
+		 * until ATX comes on; never repeated once a result is stored. */
+		if (!fan_control_state.auto_cal_requested &&
+		    settings->environment.fan_cal_min_spin_percent == 0 &&
+		    emc2301_is_initialized() && sr_latch_get_state()) {
+			int crc = fan_calibrate_request();
+
+			if (crc == 0) {
+				fan_control_state.auto_cal_requested = true;
+				LOG_INF("No stored fan characterization; running it once now");
+				continue;
+			}
+			if (crc != -EHOSTDOWN) {
+				fan_control_state.auto_cal_requested = true;  /* don't spin on errors */
+			}
+		}
+
 		/* Under external fan control we only keep the cache warm, no PWM logic. */
 		if (settings->environment.use_external_fan_control) {
-			k_msleep(settings->environment.fan_update_interval_ms);
+			fan_control_wait(settings->environment.fan_update_interval_ms);
 			continue;
 		}
 
 		if (ret != 0) {
 			LOG_WRN("Failed to read temperature: %d", ret);
-			k_msleep(settings->environment.fan_update_interval_ms);
+			fan_control_wait(settings->environment.fan_update_interval_ms);
 			continue;
 		}
 
@@ -151,7 +192,7 @@ static void fan_control_thread_func(void *arg1, void *arg2, void *arg3)
 					     &current_temp, &temp_src);
 		if (ret != 0) {
 			LOG_WRN("No valid temperature source, skipping fan control update");
-			k_msleep(settings->environment.fan_update_interval_ms);
+			fan_control_wait(settings->environment.fan_update_interval_ms);
 			continue;
 		}
 
@@ -160,7 +201,14 @@ static void fan_control_thread_func(void *arg1, void *arg2, void *arg3)
 
 		/* Apply hysteresis */
 		uint8_t target_percent = apply_hysteresis(current_temp, calculated_percent, settings);
-		
+
+		/* Never drive a running fan below the level known to keep it spinning
+		 * (0 % still means off). */
+		if (target_percent > 0 &&
+		    target_percent < settings->environment.fan_min_drive_percent) {
+			target_percent = settings->environment.fan_min_drive_percent;
+		}
+
 		/* Convert percentage to duty cycle */
 		uint8_t duty = emc2301_percent_to_duty(target_percent);
 		
@@ -176,9 +224,9 @@ static void fan_control_thread_func(void *arg1, void *arg2, void *arg3)
 		/* Update state tracking */
 		fan_control_state.last_temperature = current_temp;
 		fan_control_state.last_fan_percent = target_percent;
-		
-		/* Sleep until next update */
-		k_msleep(settings->environment.fan_update_interval_ms);
+
+		/* Sleep until next update (or until kicked) */
+		fan_control_wait(settings->environment.fan_update_interval_ms);
 	}
 	
 	LOG_INF("Fan control thread stopped");
@@ -253,9 +301,60 @@ int fan_control_stop(void)
 	fan_control_state.running = false;
 	
 	/* Wait for thread to finish */
+	k_sem_give(&fan_wake);
 	k_thread_join(fan_control_state.thread_id, K_SECONDS(5));
-	
+
 	return 0;
+}
+
+void fan_control_hw_config_from_settings(const struct environment_settings *env,
+					 struct emc2301_config *cfg)
+{
+	cfg->pwm_base_hz = env->fan_pwm_base_hz;
+	cfg->pwm_divide = env->fan_pwm_divide;
+	cfg->tach_pulses_per_rev = env->fan_tach_pulses_per_rev;
+	cfg->tach_edges = env->fan_tach_edges;
+	cfg->tach_range_mult = env->fan_tach_range;
+	cfg->min_drive_percent = env->fan_min_drive_percent;
+}
+
+int fan_control_apply_hw_config(void)
+{
+	struct emc2301_config cfg;
+	int ret;
+
+	if (!emc2301_is_initialized()) {
+		return -ENODEV;
+	}
+	fan_control_hw_config_from_settings(&openjbod_settings_get()->environment, &cfg);
+	ret = emc2301_apply_config(&cfg);
+	if (ret) {
+		LOG_ERR("Failed to apply fan hardware config: %d", ret);
+		return ret;
+	}
+	fan_control_kick();
+	return 0;
+}
+
+void fan_control_kick(void)
+{
+	k_sem_give(&fan_wake);
+}
+
+uint8_t fan_control_current_target(void)
+{
+	return fan_control_state.last_fan_percent;
+}
+
+const char *fan_control_mode(void)
+{
+	if (fan_control_state.calibrating) {
+		return "calibrating";
+	}
+	if (openjbod_settings_get()->environment.use_external_fan_control) {
+		return "external";
+	}
+	return "auto";
 }
 
 const struct fan_control_config* fan_control_get_config(void)
