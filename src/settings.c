@@ -28,7 +28,7 @@ LOG_MODULE_REGISTER(tank_settings, LOG_LEVEL_INF);
 		.ip_mask = "255.255.255.0",                                                   \
 		.dns1 = "8.8.8.8",                                                            \
 		.hostname = "openjbod",                                                       \
-		.ipv6_mode = IPV6_MODE_SLAAC,                                                   \
+		.ipv6_mode = IPV6_MODE_DISABLED,                                               \
 		.ipv6_addr = "",                                                             \
 		.ipv6_prefix_length = 64,                                                       \
 		.ipv6_gateway = "",                                                          \
