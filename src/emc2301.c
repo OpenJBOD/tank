@@ -1,6 +1,13 @@
 /*
  * EMC2301 Fan Controller Driver for OpenJBOD
- * Based on reference implementation and datasheet
+ *
+ * Direct Setting mode only: the firmware owns the PWM duty; the chip's RPM
+ * control algorithm (EN_ALGO) stays disabled. Register layout and the tach
+ * conversion follow the EMC2301 datasheet rev 1.3 / AN17.4:
+ *
+ *     RPM = 3932160 * m / COUNT     (valid when edges = 2 * pulses_per_rev + 1)
+ *
+ * where COUNT is the 13-bit tach reading and m the RANGE multiplier (1/2/4/8).
  */
 
 #include <zephyr/kernel.h>
@@ -9,6 +16,7 @@
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/logging/log.h>
 #include <errno.h>
+#include <string.h>
 #include "emc2301.h"
 
 LOG_MODULE_REGISTER(emc2301, LOG_LEVEL_INF);
@@ -16,11 +24,17 @@ LOG_MODULE_REGISTER(emc2301, LOG_LEVEL_INF);
 /* Device tree reference for I2C bus */
 static const struct device *i2c_dev = DEVICE_DT_GET(DT_NODELABEL(i2c0));
 
-/* Driver data */
-static struct emc2301_data emc_data = {0};
+/* Driver state. The mutex serialises chip access from the fan-control thread,
+ * the HTTP server, the shell and the calibration routine. */
+static K_MUTEX_DEFINE(emc_lock);
+static struct emc2301_data emc_data;
+static struct emc2301_config applied_cfg = EMC2301_CONFIG_DEFAULTS;
+static bool initialized;
 
 #define EMC2301_I2C_RETRIES     3
 #define EMC2301_I2C_RETRY_MS    10
+
+static const uint32_t pwm_base_table[4] = { 26000, 19531, 4882, 2441 };
 
 /**
  * Read or write a single EMC2301 register, with retries. For a write, *value is
@@ -65,25 +79,44 @@ static int emc2301_reg_write(uint8_t reg, uint8_t value)
 	return emc2301_reg_access(reg, &value, true);
 }
 
+/* Write a register and confirm it read back as expected (masked). */
+static int emc2301_reg_write_verify(uint8_t reg, uint8_t value, uint8_t mask)
+{
+	uint8_t rb;
+	int ret = emc2301_reg_write(reg, value);
+
+	if (ret < 0) {
+		return ret;
+	}
+	ret = emc2301_reg_read(reg, &rb);
+	if (ret < 0) {
+		return ret;
+	}
+	if ((rb & mask) != (value & mask)) {
+		LOG_ERR("Register 0x%02x read back 0x%02x, expected 0x%02x", reg, rb, value);
+		return -EIO;
+	}
+	return 0;
+}
+
 /**
- * Read two bytes from EMC2301 register (big-endian)
+ * Read the tach reading pair. The high byte must be read first: the chip
+ * latches the low byte into a shadow register on that access.
  */
-static int emc2301_reg_read_word(uint8_t reg_msb, uint16_t *value)
+static int emc2301_read_tach_raw(uint16_t *raw)
 {
 	uint8_t msb, lsb;
 	int ret;
 
-	ret = emc2301_reg_read(reg_msb, &msb);
+	ret = emc2301_reg_read(EMC2301_REG_TACH_READING_MSB, &msb);
 	if (ret < 0) {
 		return ret;
 	}
-
-	ret = emc2301_reg_read(reg_msb + 1, &lsb);
+	ret = emc2301_reg_read(EMC2301_REG_TACH_READING_LSB, &lsb);
 	if (ret < 0) {
 		return ret;
 	}
-
-	*value = (msb << 8) | lsb;
+	*raw = (uint16_t)((msb << 8) | lsb);
 	return 0;
 }
 
@@ -108,26 +141,217 @@ static int emc2301_verify_device(void)
 	}
 
 	if (mfg_id != EMC2301_MFG_ID) {
-		LOG_ERR("Invalid manufacturer ID: 0x%02x (expected 0x%02x)", 
+		LOG_ERR("Invalid manufacturer ID: 0x%02x (expected 0x%02x)",
 			mfg_id, EMC2301_MFG_ID);
 		return -ENODEV;
 	}
 
 	if (product_id != EMC2301_PRODUCT_ID) {
-		LOG_ERR("Invalid product ID: 0x%02x (expected 0x%02x)", 
+		LOG_ERR("Invalid product ID: 0x%02x (expected 0x%02x)",
 			product_id, EMC2301_PRODUCT_ID);
 		return -ENODEV;
 	}
 
-	LOG_INF("EMC2301 device verified (MFG: 0x%02x, PID: 0x%02x)", 
+	LOG_INF("EMC2301 device verified (MFG: 0x%02x, PID: 0x%02x)",
 		mfg_id, product_id);
 	return 0;
 }
 
-int emc2301_init(void)
+/* --- configuration helpers ---------------------------------------------- */
+
+uint32_t emc2301_snap_pwm_base_hz(uint32_t hz)
+{
+	uint32_t best = pwm_base_table[0];
+	uint32_t best_diff = UINT32_MAX;
+
+	for (size_t i = 0; i < ARRAY_SIZE(pwm_base_table); i++) {
+		uint32_t d = hz > pwm_base_table[i] ? hz - pwm_base_table[i]
+						    : pwm_base_table[i] - hz;
+		if (d < best_diff) {
+			best_diff = d;
+			best = pwm_base_table[i];
+		}
+	}
+	return best;
+}
+
+static enum emc2301_pwm_base pwm_base_enum(uint32_t snapped_hz)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(pwm_base_table); i++) {
+		if (pwm_base_table[i] == snapped_hz) {
+			return (enum emc2301_pwm_base)i;
+		}
+	}
+	return EMC2301_PWM_BASE_26000;
+}
+
+static int range_enum(uint8_t mult, enum emc2301_tach_range *out)
+{
+	switch (mult) {
+	case 1: *out = EMC2301_RANGE_500; return 0;
+	case 2: *out = EMC2301_RANGE_1000; return 0;
+	case 4: *out = EMC2301_RANGE_2000; return 0;
+	case 8: *out = EMC2301_RANGE_4000; return 0;
+	default: return -EINVAL;
+	}
+}
+
+static int edges_enum(uint8_t edges, enum emc2301_tach_edges *out)
+{
+	if (edges != 3 && edges != 5 && edges != 7 && edges != 9) {
+		return -EINVAL;
+	}
+	*out = (enum emc2301_tach_edges)((edges - 3) / 2);
+	return 0;
+}
+
+uint8_t emc2301_config_edges(const struct emc2301_config *cfg)
+{
+	return cfg->tach_edges ? cfg->tach_edges : emc2301_edges_for_ppr(cfg->tach_pulses_per_rev);
+}
+
+/* Validate and normalise a configuration into *out. */
+static int normalise_config(const struct emc2301_config *in, struct emc2301_config *out)
+{
+	enum emc2301_tach_range range;
+	enum emc2301_tach_edges edges;
+
+	if (in == NULL) {
+		return -EINVAL;
+	}
+	if (in->tach_pulses_per_rev < 1 || in->tach_pulses_per_rev > 4 ||
+	    range_enum(in->tach_range_mult, &range) != 0 ||
+	    edges_enum(emc2301_config_edges(in), &edges) != 0 ||
+	    in->min_drive_percent > 100) {
+		return -EINVAL;
+	}
+
+	*out = *in;
+	out->pwm_base_hz = emc2301_snap_pwm_base_hz(in->pwm_base_hz);
+	if (out->pwm_divide == 0) {
+		out->pwm_divide = 1;  /* the chip decodes 0 as 1 anyway */
+	}
+	return 0;
+}
+
+static int apply_config_locked(const struct emc2301_config *cfg)
+{
+	struct emc2301_config c;
+	enum emc2301_tach_range range = EMC2301_RANGE_500;
+	enum emc2301_tach_edges edges = EMC2301_EDGES_5;
+	uint8_t cfg1;
+	int ret;
+
+	ret = normalise_config(cfg, &c);
+	if (ret < 0) {
+		return ret;
+	}
+	(void)range_enum(c.tach_range_mult, &range);
+	(void)edges_enum(emc2301_config_edges(&c), &edges);
+
+	cfg1 = (uint8_t)(((uint8_t)range << EMC2301_FAN_CFG1_RANGE_SHIFT) |
+			 ((uint8_t)edges << EMC2301_FAN_CFG1_EDGES_SHIFT) |
+			 EMC2301_FAN_CFG1_UPDATE_400MS);  /* EN_ALGO = 0: direct PWM mode */
+
+	/* Normal polarity, push-pull output (the board drives the fan's PWM pin directly). */
+	ret = emc2301_reg_write_verify(EMC2301_REG_PWM_POLARITY, 0x00, 0x01);
+	if (ret < 0) {
+		return ret;
+	}
+	ret = emc2301_reg_write_verify(EMC2301_REG_PWM_OUT_CONFIG, 0x01, 0x01);
+	if (ret < 0) {
+		return ret;
+	}
+	ret = emc2301_reg_write_verify(EMC2301_REG_PWM_BASE_FREQ,
+				       (uint8_t)pwm_base_enum(c.pwm_base_hz),
+				       EMC2301_PWM_BASE_MASK);
+	if (ret < 0) {
+		return ret;
+	}
+	ret = emc2301_reg_write_verify(EMC2301_REG_PWM_DIVIDE, c.pwm_divide, 0xFF);
+	if (ret < 0) {
+		return ret;
+	}
+	ret = emc2301_reg_write_verify(EMC2301_REG_FAN_CONFIG1, cfg1, 0xFF);
+	if (ret < 0) {
+		return ret;
+	}
+	/* Only consulted by the FSC algorithm, but keep it consistent with settings. */
+	ret = emc2301_reg_write(EMC2301_REG_MIN_DRIVE,
+				emc2301_percent_to_duty(c.min_drive_percent));
+	if (ret < 0) {
+		return ret;
+	}
+
+	applied_cfg = c;
+	LOG_INF("fan hw: pwm %u Hz (/%u), %u ppr, %u edges, range x%u (min %u RPM), CFG1=0x%02x",
+		c.pwm_base_hz, c.pwm_divide, c.tach_pulses_per_rev, emc2301_config_edges(&c),
+		c.tach_range_mult, emc2301_config_min_rpm(&c), cfg1);
+	return 0;
+}
+
+int emc2301_apply_config(const struct emc2301_config *cfg)
 {
 	int ret;
-	uint8_t config_val;
+
+	k_mutex_lock(&emc_lock, K_FOREVER);
+	ret = apply_config_locked(cfg);
+	k_mutex_unlock(&emc_lock);
+	return ret;
+}
+
+void emc2301_get_config(struct emc2301_config *out)
+{
+	if (out) {
+		k_mutex_lock(&emc_lock, K_FOREVER);
+		*out = applied_cfg;
+		k_mutex_unlock(&emc_lock);
+	}
+}
+
+uint32_t emc2301_effective_pwm_hz(void)
+{
+	uint8_t div = applied_cfg.pwm_divide ? applied_cfg.pwm_divide : 1;
+
+	return applied_cfg.pwm_base_hz / div;
+}
+
+uint16_t emc2301_count_to_rpm(uint16_t count13, const struct emc2301_config *cfg)
+{
+	uint32_t num, den, rpm;
+
+	if (count13 == 0 || count13 >= EMC2301_TACH_VALID_MAX || cfg == NULL ||
+	    cfg->tach_pulses_per_rev == 0) {
+		return 0;
+	}
+	/* (edges-1) * m <= 64, so the numerator stays below 2^27. */
+	num = (uint32_t)(emc2301_config_edges(cfg) - 1) * cfg->tach_range_mult *
+	      (EMC2301_TACH_RPM_CONST / 2);
+	den = (uint32_t)cfg->tach_pulses_per_rev * count13;
+	rpm = num / den;
+	if (rpm > UINT16_MAX) {
+		rpm = UINT16_MAX;
+	}
+	return (uint16_t)rpm;
+}
+
+uint16_t emc2301_config_min_rpm(const struct emc2301_config *cfg)
+{
+	return emc2301_count_to_rpm(EMC2301_TACH_VALID_MAX - 1, cfg);
+}
+
+bool emc2301_is_initialized(void)
+{
+	return initialized;
+}
+
+/* --- init --------------------------------------------------------------- */
+
+int emc2301_init(const struct emc2301_config *cfg)
+{
+	struct emc2301_config defaults = EMC2301_CONFIG_DEFAULTS;
+	uint8_t reg;
+	int ret;
 
 	LOG_INF("Initializing EMC2301 fan controller");
 
@@ -136,161 +360,111 @@ int emc2301_init(void)
 		return -ENODEV;
 	}
 
-	/* Verify device */
 	ret = emc2301_verify_device();
 	if (ret < 0) {
 		return ret;
 	}
 
-	/* Step 1: Enable the device and drive output, disable watchdog */
-	config_val = EMC2301_CONFIG_DRV_EN | EMC2301_CONFIG_DIS_TO;  /* Enable drive, disable timeout */
-	LOG_INF("Writing EMC2301 configuration: 0x%02x", config_val);
-	ret = emc2301_reg_write(EMC2301_REG_CONFIG, config_val);
+	k_mutex_lock(&emc_lock, K_FOREVER);
+
+	/* Disable the SMBus timeout only. The CLK pin is unconnected on OpenJBOD,
+	 * so neither clock-output nor external-clock bits are set. */
+	ret = emc2301_reg_write_verify(EMC2301_REG_CONFIG, EMC2301_CONFIG_DIS_TO, 0xFF);
 	if (ret < 0) {
 		LOG_ERR("Failed to write configuration register: %d", ret);
+		goto out;
+	}
+
+	ret = apply_config_locked(cfg ? cfg : &defaults);
+	if (ret == -EINVAL) {
+		LOG_WRN("Invalid fan configuration, falling back to defaults");
+		ret = apply_config_locked(&defaults);
+	}
+	if (ret < 0) {
+		LOG_ERR("Failed to apply fan configuration: %d", ret);
+		goto out;
+	}
+
+	/* Status registers are read-to-clear; drop anything latched since power-up. */
+	(void)emc2301_reg_read(EMC2301_REG_FAN_STATUS, &reg);
+	(void)emc2301_reg_read(EMC2301_REG_FAN_STALL, &reg);
+	(void)emc2301_reg_read(EMC2301_REG_FAN_SPIN, &reg);
+	(void)emc2301_reg_read(EMC2301_REG_DRIVE_FAIL, &reg);
+
+	initialized = true;
+	emc_data.initialized = true;
+	ret = 0;
+
+out:
+	k_mutex_unlock(&emc_lock);
+	if (ret < 0) {
 		return ret;
 	}
 
-	/* Read back configuration to verify */
-	uint8_t config_readback;
-	ret = emc2301_reg_read(EMC2301_REG_CONFIG, &config_readback);
-	if (ret < 0) {
-		LOG_WRN("Failed to read back configuration: %d", ret);
-	} else {
-		LOG_INF("EMC2301 configuration readback: 0x%02x", config_readback);
-	}
-
-	/* Step 2: Configure PWM output - set as push-pull output, not open-drain */
-	ret = emc2301_reg_write(EMC2301_REG_PWM_OUT_CONFIG, 0x01);
-	if (ret < 0) {
-		LOG_WRN("Failed to configure PWM output: %d", ret);
-	} else {
-		LOG_INF("PWM output configured for push-pull mode");
-	}
-
-	/* Step 3: Set PWM base frequency to default (26 kHz) */
-	ret = emc2301_reg_write(EMC2301_REG_PWM_BASE_FREQ, 0x1F);  /* Default frequency setting */
-	if (ret < 0) {
-		LOG_WRN("Failed to set PWM base frequency: %d", ret);
-	} else {
-		LOG_INF("PWM base frequency configured");
-	}
-
-	/* Step 4: Set PWM frequency divider to 1 (no division) */
-	ret = emc2301_reg_write(EMC2301_REG_PWM_DIVIDE, 0x00);
-	if (ret < 0) {
-		LOG_WRN("Failed to set PWM frequency divider: %d", ret);
-	} else {
-		LOG_INF("PWM frequency divider configured");
-	}
-
-	/* Step 5: Set minimum drive to prevent fan stall - do this BEFORE setting PWM duty */
-	ret = emc2301_reg_write(EMC2301_REG_MIN_DRIVE, emc2301_percent_to_duty(10));
-	if (ret < 0) {
-		LOG_WRN("Failed to set minimum drive: %d", ret);
-	} else {
-		LOG_INF("Minimum drive configured to %d%%", 10);
-	}
-
-	/* Step 6: Configure fan tachometer settings first */
-	/* Try 3 edges (single pole) first - most common for PC fans */
-	ret = emc2301_set_fan_config(3, 2);
-	if (ret < 0) {
-		LOG_WRN("Failed to set fan configuration: %d", ret);
-		/* Continue initialization - this is not critical */
-	}
-
-	/* Step 7: Clear any existing faults */
-	uint8_t stall_reg;
-	ret = emc2301_reg_read(EMC2301_REG_FAN_STALL, &stall_reg);
-	if (ret >= 0 && (stall_reg & 0x01)) {
-		LOG_INF("Clearing fan stall status");
-		ret = emc2301_reg_write(EMC2301_REG_FAN_STALL, stall_reg & ~0x01);
-		if (ret < 0) {
-			LOG_WRN("Failed to clear fan stall: %d", ret);
-		}
-	}
-
-	/* Step 8: Set initial fan speed to 25% */
+	/* Initial fan speed: 25 % until the fan-control loop takes over. */
 	ret = emc2301_set_pwm_duty(emc2301_percent_to_duty(25));
 	if (ret < 0) {
 		LOG_WRN("Failed to set initial fan speed: %d", ret);
 	}
 
-	emc_data.initialized = true;
 	LOG_INF("EMC2301 initialized successfully");
-	LOG_INF("Note: Fan faults are normal if no fan is physically connected");
-
+	LOG_INF("Note: a stall flag is normal if no fan is physically connected");
 	return 0;
 }
 
-int emc2301_set_pwm_duty(uint8_t duty)
+/* --- duty --------------------------------------------------------------- */
+
+static int set_pwm_duty_locked(uint8_t duty)
 {
-	int ret;
 	uint8_t readback;
-	uint8_t config_reg;
+	bool from_stopped = (emc_data.pwm_duty == 0 && duty != 0);
+	int ret;
 
-	if (duty > EMC2301_FAN_MAX) {
-		LOG_ERR("Invalid duty cycle: %d (max %d)", duty, EMC2301_FAN_MAX);
-		return -EINVAL;
-	}
-
-	LOG_DBG("Setting PWM duty cycle to %d (%d%%)", duty, emc2301_duty_to_percent(duty));
-	
-	/* First, ensure the device is configured correctly for direct PWM control */
-	ret = emc2301_reg_read(EMC2301_REG_CONFIG, &config_reg);
-	if (ret < 0) {
-		LOG_ERR("Failed to read config register: %d", ret);
-		return ret;
-	}
-	
-	/* Make sure DRV_EN is set */
-	if (!(config_reg & EMC2301_CONFIG_DRV_EN)) {
-		config_reg |= EMC2301_CONFIG_DRV_EN;
-		ret = emc2301_reg_write(EMC2301_REG_CONFIG, config_reg);
-		if (ret < 0) {
-			LOG_ERR("Failed to enable drive output: %d", ret);
-			return ret;
-		}
-		LOG_INF("Enabled drive output");
-		/* Small delay to let the configuration take effect */
-		k_msleep(10);
-	}
-	
 	ret = emc2301_reg_write(EMC2301_REG_FAN_DRIVE, duty);
 	if (ret < 0) {
 		LOG_ERR("Failed to set PWM duty cycle: %d", ret);
 		return ret;
 	}
 
-	/* Small delay before readback */
-	k_msleep(1);
+	/* Leaving 0 % starts the chip's Spin Up Routine: for the spin-up time
+	 * (default 500 ms) the drive register reports the spin-up level, not the
+	 * value just written, so a read-back cannot be used to verify it. */
+	if (from_stopped) {
+		emc_data.pwm_duty = duty;
+		LOG_DBG("PWM duty set to %d from stopped; spin-up routine running", duty);
+		return 0;
+	}
 
-	/* Read back to verify */
+	k_msleep(1);
 	ret = emc2301_reg_read(EMC2301_REG_FAN_DRIVE, &readback);
-	if (ret < 0) {
-		LOG_WRN("Failed to read back PWM duty: %d", ret);
-	} else {
-		LOG_DBG("PWM duty readback: %d (%d%%)", readback, emc2301_duty_to_percent(readback));
-		if (readback != duty) {
-			LOG_WRN("PWM duty mismatch: wrote %d, read %d", duty, readback);
-			/* Try writing again if mismatch occurs */
-			ret = emc2301_reg_write(EMC2301_REG_FAN_DRIVE, duty);
-			if (ret < 0) {
-				LOG_ERR("Retry failed to set PWM duty cycle: %d", ret);
-				return ret;
-			}
-			k_msleep(1);
-			ret = emc2301_reg_read(EMC2301_REG_FAN_DRIVE, &readback);
-			if (ret >= 0) {
-				LOG_INF("Retry PWM duty readback: %d (%d%%)", readback, emc2301_duty_to_percent(readback));
-			}
+	if (ret >= 0 && readback != duty) {
+		LOG_WRN("PWM duty mismatch: wrote %d, read %d; retrying", duty, readback);
+		ret = emc2301_reg_write(EMC2301_REG_FAN_DRIVE, duty);
+		if (ret < 0) {
+			LOG_ERR("Retry failed to set PWM duty cycle: %d", ret);
+			return ret;
+		}
+		k_msleep(1);
+		ret = emc2301_reg_read(EMC2301_REG_FAN_DRIVE, &readback);
+		if (ret >= 0 && readback != duty) {
+			LOG_ERR("PWM duty still mismatched after retry: %d", readback);
+			return -EIO;
 		}
 	}
 
 	emc_data.pwm_duty = duty;
-
+	LOG_DBG("PWM duty set to %d (%d%%)", duty, emc2301_duty_to_percent(duty));
 	return 0;
+}
+
+int emc2301_set_pwm_duty(uint8_t duty)
+{
+	int ret;
+
+	k_mutex_lock(&emc_lock, K_FOREVER);
+	ret = set_pwm_duty_locked(duty);
+	k_mutex_unlock(&emc_lock);
+	return ret;
 }
 
 int emc2301_get_pwm_duty(uint8_t *duty)
@@ -301,78 +475,70 @@ int emc2301_get_pwm_duty(uint8_t *duty)
 		return -EINVAL;
 	}
 
+	k_mutex_lock(&emc_lock, K_FOREVER);
 	ret = emc2301_reg_read(EMC2301_REG_FAN_DRIVE, duty);
 	if (ret < 0) {
 		LOG_ERR("Failed to read PWM duty cycle: %d", ret);
-		/* Return cached value if I2C fails */
-		*duty = emc_data.pwm_duty;
-		return 0;  /* Don't fail completely, just return cached value */
+		*duty = emc_data.pwm_duty;  /* fall back to the cached value */
+	} else {
+		emc_data.pwm_duty = *duty;
 	}
-
-	emc_data.pwm_duty = *duty;
+	k_mutex_unlock(&emc_lock);
 	return 0;
+}
+
+/* --- tach --------------------------------------------------------------- */
+
+static int read_tach_locked(uint16_t *count13, bool *valid)
+{
+	uint16_t raw;
+	int ret;
+
+	ret = emc2301_read_tach_raw(&raw);
+	if (ret < 0) {
+		return ret;
+	}
+	*count13 = (uint16_t)(raw >> (16 - EMC2301_TACH_COUNT_BITS));
+	*valid = (*count13 != 0) && (*count13 < EMC2301_TACH_VALID_MAX);
+	emc_data.tach_count = *count13;
+	emc_data.tach_valid = *valid;
+	LOG_DBG("Tach raw 0x%04x -> count %u (%s)", raw, *count13, *valid ? "valid" : "no signal");
+	return 0;
+}
+
+int emc2301_read_tach(uint16_t *count13, bool *valid)
+{
+	int ret;
+
+	if (count13 == NULL || valid == NULL) {
+		return -EINVAL;
+	}
+	k_mutex_lock(&emc_lock, K_FOREVER);
+	ret = read_tach_locked(count13, valid);
+	k_mutex_unlock(&emc_lock);
+	return ret;
 }
 
 int emc2301_get_fan_speed(uint16_t *rpm)
 {
-	uint16_t tach_count;
-	uint8_t config1_reg, status_reg;
+	uint16_t count;
+	bool valid;
 	int ret;
 
 	if (rpm == NULL) {
 		return -EINVAL;
 	}
 
-	ret = emc2301_reg_read_word(EMC2301_REG_TACH_READING_MSB, &tach_count);
+	k_mutex_lock(&emc_lock, K_FOREVER);
+	ret = read_tach_locked(&count, &valid);
 	if (ret < 0) {
 		LOG_ERR("Failed to read tachometer: %d", ret);
-		/* Return cached value if I2C fails */
-		*rpm = emc_data.fan_rpm;
-		return 0;  /* Don't fail completely */
-	}
-
-	/* Read fan config1 and status for debugging */
-	ret = emc2301_reg_read(EMC2301_REG_FAN_CONFIG1, &config1_reg);
-	if (ret >= 0) {
-		LOG_DBG("Fan config1: 0x%02x", config1_reg);
-	}
-	
-	ret = emc2301_reg_read(EMC2301_REG_FAN_STATUS, &status_reg);
-	if (ret >= 0) {
-		LOG_DBG("Fan status: 0x%02x", status_reg);
-	}
-
-	LOG_DBG("Raw tach reading: 0x%04x", tach_count);
-
-	/* Check for invalid reading (fan stopped or not connected) */
-	if ((tach_count >> 8) == 0xFF || tach_count == 0) {
-		*rpm = 0;
-		emc_data.fan_rpm = 0;
-		LOG_DBG("Invalid tach reading - fan may not be connected or not spinning");
-		return 0;
-	}
-
-	/* Extract valid tach count (remove unused bits) */
-	tach_count = tach_count >> EMC2301_TACH_REGS_UNUSE_BITS;
-
-	if (tach_count == 0) {
-		*rpm = 0;
+		*rpm = emc_data.fan_rpm;  /* fall back to the cached value */
 	} else {
-		/* Calculate RPM using the standard formula */
-		uint32_t rpm_calc = EMC2301_RPM_FACTOR / tach_count;
-		
-		LOG_DBG("RPM calculation: %u / %u = %u", EMC2301_RPM_FACTOR, tach_count, rpm_calc);
-		
-		if (rpm_calc <= EMC2301_TACH_RANGE_MIN) {
-			*rpm = 0;
-		} else {
-			*rpm = (uint16_t)(rpm_calc * EMC2301_TACH_CNT_MULTIPLIER);
-		}
+		*rpm = valid ? emc2301_count_to_rpm(count, &applied_cfg) : 0;
+		emc_data.fan_rpm = *rpm;
 	}
-
-	emc_data.fan_rpm = *rpm;
-	LOG_DBG("Fan speed: %d RPM (processed tach: 0x%04x)", *rpm, tach_count);
-
+	k_mutex_unlock(&emc_lock);
 	return 0;
 }
 
@@ -385,127 +551,54 @@ int emc2301_get_status(struct emc2301_data *data)
 		return -EINVAL;
 	}
 
-	/* Read current PWM duty */
 	ret = emc2301_get_pwm_duty(&data->pwm_duty);
 	if (ret < 0) {
 		return ret;
 	}
-
-	/* Read current fan speed */
 	ret = emc2301_get_fan_speed(&data->fan_rpm);
 	if (ret < 0) {
 		return ret;
 	}
 
-	/* Read fan status */
+	k_mutex_lock(&emc_lock, K_FOREVER);
+	data->tach_count = emc_data.tach_count;
+	data->tach_valid = emc_data.tach_valid;
 	ret = emc2301_reg_read(EMC2301_REG_FAN_STATUS, &status_reg);
+	k_mutex_unlock(&emc_lock);
 	if (ret < 0) {
 		LOG_ERR("Failed to read fan status: %d", ret);
 		return ret;
 	}
 
-	/* Check for fan faults */
-	data->fan_fault = (status_reg & (EMC2301_FAN_STATUS_FNSTL | 
-					 EMC2301_FAN_STATUS_DVFAIL)) != 0;
-	
-	/* Log detailed fault information */
-	if (status_reg & EMC2301_FAN_STATUS_FNSTL) {
-		LOG_DBG("Fan fault: Fan stall detected");
-	}
-	if (status_reg & EMC2301_FAN_STATUS_DVFAIL) {
-		LOG_DBG("Fan fault: Drive fail detected");
-	}
-	if (status_reg & EMC2301_FAN_STATUS_FNSPIN) {
-		LOG_DBG("Fan status: Fan spin detected");
-	}
-	if (status_reg & EMC2301_FAN_STATUS_WATCH) {
-		LOG_DBG("Fan status: Watchdog timeout");
-	}
-	
-	data->initialized = emc_data.initialized;
+	data->status_reg = status_reg;
+	/* The chip's FNSTL bit is latched (read-to-clear) and also fires whenever the
+	 * fan is deliberately stopped, so report the *current* condition instead:
+	 * the fan is being driven but produces no tach signal. */
+	data->stall = (data->pwm_duty > 0) && !data->tach_valid;
+	data->spin_fail = (status_reg & EMC2301_FAN_STATUS_FNSPIN) != 0;
+	data->drive_fail = (status_reg & EMC2301_FAN_STATUS_DVFAIL) != 0;
+	data->watchdog = (status_reg & EMC2301_FAN_STATUS_WATCH) != 0;
+	data->fan_fault = data->stall || data->drive_fail;
+	data->initialized = initialized;
 
-	/* Update cached data */
-	emc_data = *data;
-
+	if (data->stall) {
+		LOG_DBG("Fan status: stall flag set");
+	}
+	if (data->watchdog) {
+		LOG_DBG("Fan status: watchdog timeout");
+	}
 	return 0;
 }
 
-int emc2301_set_fan_config(uint8_t edges, uint8_t range_multiplier)
+int emc2301_read_reg(uint8_t reg, uint8_t *val)
 {
-	uint8_t config_val = 0;
-	uint8_t edges_bits, range_bits;
 	int ret;
 
-	/* Map edges to register bits */
-	switch (edges) {
-	case 3:
-		edges_bits = EMC2301_FAN_EDGES_3;
-		break;
-	case 5:
-		edges_bits = EMC2301_FAN_EDGES_5;
-		break;
-	case 7:
-		edges_bits = EMC2301_FAN_EDGES_7;
-		break;
-	case 9:
-		edges_bits = EMC2301_FAN_EDGES_9;
-		break;
-	default:
-		LOG_ERR("Invalid edge count: %d (must be 3, 5, 7, or 9)", edges);
+	if (val == NULL) {
 		return -EINVAL;
 	}
-
-	/* Map range multiplier to register bits */
-	switch (range_multiplier) {
-	case 1:
-		range_bits = EMC2301_FAN_RANGE_500;
-		break;
-	case 2:
-		range_bits = EMC2301_FAN_RANGE_1000;
-		break;
-	case 4:
-		range_bits = EMC2301_FAN_RANGE_2000;
-		break;
-	case 8:
-		range_bits = EMC2301_FAN_RANGE_4000;
-		break;
-	default:
-		LOG_ERR("Invalid range multiplier: %d (must be 1, 2, 4, or 8)", range_multiplier);
-		return -EINVAL;
-	}
-
-	/* Read current configuration to preserve other bits */
-	ret = emc2301_reg_read(EMC2301_REG_FAN_CONFIG1, &config_val);
-	if (ret < 0) {
-		LOG_WRN("Failed to read fan config, using default");
-		config_val = 0;
-	}
-	LOG_INF("Current fan config1: 0x%02x", config_val);
-
-	/* Clear and set edges and range bits, enable tach update but not fan algorithm */
-	config_val &= ~(EMC2301_FAN_CFG1_EDGES_MASK | EMC2301_FAN_CFG1_RANGE_MASK | EMC2301_FAN_CFG1_ENABLE);
-	config_val |= edges_bits | range_bits | EMC2301_FAN_CFG1_UPDATE;
-	
-	LOG_INF("Writing fan config1: 0x%02x (edges_bits=0x%02x, range_bits=0x%02x)", 
-		config_val, edges_bits, range_bits);
-
-	ret = emc2301_reg_write(EMC2301_REG_FAN_CONFIG1, config_val);
-	if (ret < 0) {
-		LOG_ERR("Failed to write fan configuration: %d", ret);
-		return ret;
-	}
-
-	/* Read back to verify */
-	uint8_t config1_readback;
-	ret = emc2301_reg_read(EMC2301_REG_FAN_CONFIG1, &config1_readback);
-	if (ret < 0) {
-		LOG_WRN("Failed to read back fan config1: %d", ret);
-	} else {
-		LOG_INF("Fan config1 readback: 0x%02x", config1_readback);
-	}
-
-	LOG_INF("Fan configuration set: %d edges, %dx range multiplier", 
-		edges, range_multiplier);
-
-	return 0;
+	k_mutex_lock(&emc_lock, K_FOREVER);
+	ret = emc2301_reg_read(reg, val);
+	k_mutex_unlock(&emc_lock);
+	return ret;
 }

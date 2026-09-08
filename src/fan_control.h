@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "settings.h"  /* For fan_curve_point definition */
+#include "emc2301.h"
 
 /* Fan control configuration */
 struct fan_control_config {
@@ -58,5 +59,27 @@ int fan_control_set_config(const struct fan_control_config *config);
  * @return 0 on success, negative error code otherwise
  */
 int fan_control_get_status(float *current_temp, uint8_t *current_fan_percent, bool *is_running);
+
+/**
+ * Build the EMC2301 hardware configuration from persisted environment settings.
+ */
+void fan_control_hw_config_from_settings(const struct environment_settings *env,
+					 struct emc2301_config *cfg);
+
+/**
+ * Re-apply the persisted fan hardware settings to the EMC2301 and wake the
+ * control loop so the change takes effect immediately.
+ * @return 0 on success, negative error code otherwise
+ */
+int fan_control_apply_hw_config(void);
+
+/** Wake the control loop early (e.g. a calibration request was queued). */
+void fan_control_kick(void);
+
+/** Last fan percentage the curve asked for (after hysteresis and min-drive clamp). */
+uint8_t fan_control_current_target(void);
+
+/** "auto", "external" or "calibrating". */
+const char *fan_control_mode(void);
 
 #endif /* FAN_CONTROL_H */

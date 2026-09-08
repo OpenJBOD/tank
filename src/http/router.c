@@ -107,6 +107,7 @@ HTTP_RESOURCE_DEFINE(power_status_resource, test_http_service, "/api/power", &po
 HTTP_RESOURCE_DEFINE(temp_resource, test_http_service, "/api/temp", &temp_resource_detail);
 HTTP_RESOURCE_DEFINE(fan_resource, test_http_service, "/api/fan", &fan_resource_detail);
 HTTP_RESOURCE_DEFINE(fan_set_resource, test_http_service, "/api/fan/set", &fan_set_resource_detail);
+HTTP_RESOURCE_DEFINE(fan_calibrate_resource, test_http_service, "/api/fan/calibrate", &fan_calibrate_resource_detail);
 HTTP_RESOURCE_DEFINE(settings_resource, test_http_service, "/api/settings", &settings_resource_detail);
 HTTP_RESOURCE_DEFINE(status_resource, test_http_service, "/api/status", &status_resource_detail);
 HTTP_RESOURCE_DEFINE(users_resource, test_http_service, "/api/users", &users_resource_detail);
@@ -165,6 +166,7 @@ HTTP_RESOURCE_DEFINE(power_status_resource_https, test_https_service, "/api/powe
 HTTP_RESOURCE_DEFINE(temp_resource_https, test_https_service, "/api/temp", &temp_resource_detail);
 HTTP_RESOURCE_DEFINE(fan_resource_https, test_https_service, "/api/fan", &fan_resource_detail);
 HTTP_RESOURCE_DEFINE(fan_set_resource_https, test_https_service, "/api/fan/set", &fan_set_resource_detail);
+HTTP_RESOURCE_DEFINE(fan_calibrate_resource_https, test_https_service, "/api/fan/calibrate", &fan_calibrate_resource_detail);
 HTTP_RESOURCE_DEFINE(settings_resource_https, test_https_service, "/api/settings", &settings_resource_detail);
 HTTP_RESOURCE_DEFINE(status_resource_https, test_https_service, "/api/status", &status_resource_detail);
 HTTP_RESOURCE_DEFINE(users_resource_https, test_https_service, "/api/users", &users_resource_detail);

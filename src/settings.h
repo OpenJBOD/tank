@@ -107,6 +107,18 @@ struct environment_settings {
 	uint8_t fan_hysteresis_percent;   /* Hysteresis to prevent oscillation */
 	uint8_t primary_temp_source;      /* enum temp_source: preferred probe */
 	struct fan_curve_point fan_curve[5]; /* 5-point fan curve */
+
+	/* EMC2301 hardware configuration (see emc2301.h). Defaults suit any
+	 * Intel-spec 4-wire fan: 26 kHz PWM, 2 tach pulses per revolution. */
+	uint32_t fan_pwm_base_hz;         /* 26000 | 19531 | 4882 | 2441 */
+	uint8_t fan_pwm_divide;           /* 1..255, PWM = base / divide */
+	uint8_t fan_tach_pulses_per_rev;  /* 1..4 (2 = standard) */
+	uint8_t fan_tach_edges;           /* 0 = auto (2*ppr+1), or 3|5|7|9; fewer edges read slower fans */
+	uint8_t fan_tach_range;           /* tach range multiplier 1|2|4|8 (min RPM 500*m) */
+	uint8_t fan_min_drive_percent;    /* fan_control never drives below this when on */
+	/* Results of the last fan characterization run (0 = never calibrated). */
+	uint8_t fan_cal_min_spin_percent; /* lowest duty that started the fan from rest */
+	uint16_t fan_cal_max_rpm;         /* RPM measured at 100 % duty */
 };
 
 /* Console (shell) backend enable flags. Both default true. */
@@ -138,6 +150,9 @@ int openjbod_settings_set_http(const struct http_settings *http);
 void openjbod_settings_take_custom_certificate(char *hex_or_null);
 void openjbod_settings_take_custom_private_key(char *hex_or_null);
 int openjbod_settings_set_environment(const struct environment_settings *environment);
+/* Restore the fan hardware fields (fan_pwm_*, fan_tach_*, fan_min_drive_percent,
+ * fan_cal_*) to their defaults and persist them. */
+int openjbod_settings_reset_fan_hw(void);
 int openjbod_settings_set_console(const struct console_settings *console);
 int openjbod_settings_save_user(int user_idx, const struct user_entry *user);
 int openjbod_settings_delete_user(int user_idx);

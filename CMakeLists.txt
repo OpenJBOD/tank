@@ -42,6 +42,7 @@ target_sources(app PRIVATE
   src/temperature.c
   src/emc2301.c
   src/fan_control.c
+  src/fan_calibrate.c
   src/settings.c
   src/device_info.c
   src/http/auth.c

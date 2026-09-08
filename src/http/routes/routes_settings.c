@@ -15,6 +15,7 @@
 
 #include "http/auth.h"
 #include "http/server_control.h"
+#include "fan_control.h"
 #include "settings.h"
 
 LOG_MODULE_REGISTER(tank_http_settings, LOG_LEVEL_INF);
@@ -96,6 +97,9 @@ struct env_json {
 	int32_t fan_update_interval_ms, fan_hysteresis_percent, primary_temp_source;
 	struct curve_json fan_curve[5];
 	size_t fan_curve_count;
+	/* EMC2301 hardware configuration (fan_cal_* are read-only, not parsed) */
+	int32_t fan_pwm_base_hz, fan_pwm_divide, fan_tach_pulses_per_rev, fan_tach_edges,
+		fan_tach_range, fan_min_drive_percent;
 };
 
 struct console_json {
@@ -150,6 +154,12 @@ static const struct json_obj_descr env_descr[] = {
 	JSON_OBJ_DESCR_PRIM(struct env_json, fan_update_interval_ms, JSON_TOK_NUMBER),
 	JSON_OBJ_DESCR_PRIM(struct env_json, fan_hysteresis_percent, JSON_TOK_NUMBER),
 	JSON_OBJ_DESCR_PRIM(struct env_json, primary_temp_source, JSON_TOK_NUMBER),
+	JSON_OBJ_DESCR_PRIM(struct env_json, fan_pwm_base_hz, JSON_TOK_NUMBER),
+	JSON_OBJ_DESCR_PRIM(struct env_json, fan_pwm_divide, JSON_TOK_NUMBER),
+	JSON_OBJ_DESCR_PRIM(struct env_json, fan_tach_pulses_per_rev, JSON_TOK_NUMBER),
+	JSON_OBJ_DESCR_PRIM(struct env_json, fan_tach_edges, JSON_TOK_NUMBER),
+	JSON_OBJ_DESCR_PRIM(struct env_json, fan_tach_range, JSON_TOK_NUMBER),
+	JSON_OBJ_DESCR_PRIM(struct env_json, fan_min_drive_percent, JSON_TOK_NUMBER),
 	JSON_OBJ_DESCR_OBJ_ARRAY(struct env_json, fan_curve, 5, fan_curve_count,
 				 curve_descr, ARRAY_SIZE(curve_descr)),
 };
@@ -188,7 +198,7 @@ static int settings_handler(struct http_client_ctx *client, enum http_data_statu
 			    struct http_response_ctx *response_ctx, void *user_data)
 {
 	static char response_buffer[2048];
-	static char post_payload_buf[512];
+	static char post_payload_buf[1024];
 	static size_t cursor;
 	enum http_method method = client->method;
 
@@ -246,7 +256,15 @@ static int settings_handler(struct http_client_ctx *client, enum http_data_statu
 			 "{\"temperature\":%.1f,\"fan_percent\":%u},"
 			 "{\"temperature\":%.1f,\"fan_percent\":%u},"
 			 "{\"temperature\":%.1f,\"fan_percent\":%u}"
-			 "]"
+			 "],"
+			 "\"fan_pwm_base_hz\":%u,"
+			 "\"fan_pwm_divide\":%u,"
+			 "\"fan_tach_pulses_per_rev\":%u,"
+			 "\"fan_tach_edges\":%u,"
+			 "\"fan_tach_range\":%u,"
+			 "\"fan_min_drive_percent\":%u,"
+			 "\"fan_cal_min_spin_percent\":%u,"
+			 "\"fan_cal_max_rpm\":%u"
 			 "},"
 			 "\"console\":{"
 			 "\"uart_enabled\":%s,"
@@ -288,6 +306,14 @@ static int settings_handler(struct http_client_ctx *client, enum http_data_statu
 			 current->environment.fan_curve[3].fan_percent,
 			 (double)current->environment.fan_curve[4].temperature,
 			 current->environment.fan_curve[4].fan_percent,
+			 current->environment.fan_pwm_base_hz,
+			 current->environment.fan_pwm_divide,
+			 current->environment.fan_tach_pulses_per_rev,
+			 current->environment.fan_tach_edges,
+			 current->environment.fan_tach_range,
+			 current->environment.fan_min_drive_percent,
+			 current->environment.fan_cal_min_spin_percent,
+			 current->environment.fan_cal_max_rpm,
 			 current->console.uart_enabled ? "true" : "false",
 			 current->console.usb_enabled ? "true" : "false");
 
@@ -356,6 +382,12 @@ static int settings_handler(struct http_client_ctx *client, enum http_data_statu
 			sj.environment.fan_update_interval_ms = current->environment.fan_update_interval_ms;
 			sj.environment.fan_hysteresis_percent = current->environment.fan_hysteresis_percent;
 			sj.environment.primary_temp_source = current->environment.primary_temp_source;
+			sj.environment.fan_pwm_base_hz = current->environment.fan_pwm_base_hz;
+			sj.environment.fan_pwm_divide = current->environment.fan_pwm_divide;
+			sj.environment.fan_tach_pulses_per_rev = current->environment.fan_tach_pulses_per_rev;
+			sj.environment.fan_tach_edges = current->environment.fan_tach_edges;
+			sj.environment.fan_tach_range = current->environment.fan_tach_range;
+			sj.environment.fan_min_drive_percent = current->environment.fan_min_drive_percent;
 			for (int i = 0; i < 5; i++) {
 				sj.environment.fan_curve[i].temperature =
 					current->environment.fan_curve[i].temperature;
@@ -422,6 +454,12 @@ static int settings_handler(struct http_client_ctx *client, enum http_data_statu
 				new_environment.fan_update_interval_ms = (uint32_t)sj.environment.fan_update_interval_ms;
 				new_environment.fan_hysteresis_percent = (uint8_t)sj.environment.fan_hysteresis_percent;
 				new_environment.primary_temp_source = (uint8_t)sj.environment.primary_temp_source;
+				new_environment.fan_pwm_base_hz = (uint32_t)sj.environment.fan_pwm_base_hz;
+				new_environment.fan_pwm_divide = (uint8_t)sj.environment.fan_pwm_divide;
+				new_environment.fan_tach_pulses_per_rev = (uint8_t)sj.environment.fan_tach_pulses_per_rev;
+				new_environment.fan_tach_edges = (uint8_t)sj.environment.fan_tach_edges;
+				new_environment.fan_tach_range = (uint8_t)sj.environment.fan_tach_range;
+				new_environment.fan_min_drive_percent = (uint8_t)sj.environment.fan_min_drive_percent;
 				for (int i = 0; i < 5; i++) {
 					new_environment.fan_curve[i].temperature =
 						sj.environment.fan_curve[i].temperature;
@@ -463,6 +501,12 @@ static int settings_handler(struct http_client_ctx *client, enum http_data_statu
 					LOG_ERR("Failed to save environment settings: %d", ret);
 				} else {
 					LOG_INF("Environment settings updated successfully");
+					/* Push PWM/tach changes to the chip without a reboot. */
+					int hw = fan_control_apply_hw_config();
+
+					if (hw != 0 && hw != -ENODEV) {
+						LOG_WRN("Fan hardware config not applied: %d", hw);
+					}
 				}
 			}
 			if (console_changed && ret == 0) {

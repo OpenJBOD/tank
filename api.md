@@ -79,9 +79,10 @@ Response:
     "rp2040":      { "temperature": 36.3, "valid": true }
   },
   "fan": {
-    "fan_rpm": 1200,
-    "fan_percent": 50,
-    "fan_fault": false
+    "valid": true,
+    "rpm": 1200,
+    "speed_percent": 50,
+    "fault": false
   },
   "device": {
     "serial": "ABCD1234ABCD1234",
@@ -177,34 +178,118 @@ Response:
 ```
 
 ## GET `/api/fan`
-Returns the current fan status and RPM/PWM readings.
+Returns the fan controller (EMC2301) state: PWM output, tachometer reading and the
+active tach configuration.
 
 Response:
 ```json
 {
-  "fan_rpm": 1200,
-  "fan_percent": 50,
-  "fan_fault": false
+  "status": "fan_reading",
+  "pwm":  { "duty": 128, "percent": 50, "base_hz": 26000, "divide": 1, "effective_hz": 26000 },
+  "fan":  { "rpm": 3540, "tach_count": 1110, "tach_valid": true,
+            "fault": false, "stall": false, "spin_fail": false, "drive_fail": false,
+            "watchdog": false, "status_reg": 0 },
+  "tach": { "pulses_per_rev": 2, "edges": 5, "edges_auto": true, "range": 1, "min_rpm": 480 },
+  "control": { "mode": "auto", "target_percent": 40, "min_drive_percent": 0 },
+  "initialized": true
 }
 ```
+
+- `rpm` is derived from the 13-bit tach count as
+  `(edges - 1) * 1966080 * range / (pulses_per_rev * tach_count)` (the EMC2301
+  datasheet equation; with the datasheet edge count `2 * pulses_per_rev + 1` this is
+  `3932160 * range / tach_count`). `tach_valid` is false (and `rpm` 0) when no tach
+  signal is seen: fan stopped, absent, ATX power off, or turning slower than
+  `min_rpm`. Sampling 3 edges lowers the floor (240 RPM for a 2-pulse fan) so quiet
+  fans idling at 300 RPM still read; the characterization selects that automatically
+  for fans below 2000 RPM at 30 % duty.
+- `stall`, `spin_fail`, `drive_fail` and `watchdog` mirror the controller's status
+  register (read-to-clear, so each flag is reported once per occurrence).
+  `fault` is `stall || drive_fail`. A stall flag with no fan connected is normal.
+- `control.mode` is `auto`, `external` or `calibrating`.
 
 ## POST `/api/fan/set`
-Sets the current fan speed.
+Sets the fan drive directly. The body is form-encoded (not JSON):
 
-Body:
-```json
-{
-  "fan_percent": 75
-}
 ```
+percent=75
+```
+or
+```
+duty=191
+```
+
+`percent` is clamped to 0-100 and `duty` to 0-255. Automatic fan control overrides the
+value within one update interval unless `use_external_fan_control` is enabled.
 
 Response:
 ```json
 {
-  "status": "success",
-  "fan_percent": 75
+  "status": "fan_set_success",
+  "pwm": { "duty": 191, "percent": 75 },
+  "note": "automatic control overrides this within one update interval unless use_external_fan_control is set"
 }
 ```
+
+## GET / POST `/api/fan/calibrate`
+Best-effort fan characterization. The run executes in the fan-control thread and
+takes up to two minutes: tach check at 50 %/100 %, a duty sweep from 30 % to 100 %,
+a start scan from standstill (10-25 %), and, only if the response at the configured
+PWM frequency is flat or non-monotonic, a short retry at the other base
+frequencies. It then stores `fan_pwm_base_hz`, `fan_tach_edges` (3 for slow fans, else
+auto), `fan_tach_range` (largest range whose floor is comfortably below the lowest
+observed RPM), `fan_min_drive_percent`
+(lowest starting duty + 5) and the `fan_cal_*` results in the environment settings
+and applies them immediately. The previous duty is restored afterwards. Runs are
+aborted on request, after 120 s, on any I2C error, or if the active temperature
+exceeds 55 °C or rises more than 8 °C. Time spent below the fan curve's current
+target is capped at 10 s.
+
+Pulses per revolution cannot be measured (it only scales the RPM figure), so it is
+never changed automatically; an implausible full-speed RPM yields `suggested_ppr`.
+
+The fan must have power (ATX on). One run happens automatically after boot when no
+result has ever been stored, once ATX power is on.
+
+`POST` body (form-encoded, optional): `action=start` (default), `action=abort` or
+`action=reset` (restore the fan hardware defaults: 26 kHz, divider 1, 2 pulses/rev,
+edges auto, range x1, minimum drive 0, and clear the stored results).
+
+`POST` responses: `202 {"status":"calibration_started"}`, `409 {"status":"calibration_running"}`,
+`409 {"status":"temperature_too_high"}`, `503 {"status":"fan_controller_not_initialized"}`,
+`200 {"status":"calibration_abort_requested"}`, `200 {"status":"fan_hw_reset"}`.
+
+`GET` response:
+```json
+{
+  "state": "done",
+  "phase": "finalize",
+  "progress_percent": 100,
+  "elapsed_ms": 61200,
+  "abort_reason": null,
+  "result": {
+    "tach_present": true,
+    "monotonic": true,
+    "atx_power_on": true,
+    "budget_cutoff": false,
+    "used_retry": false,
+    "min_spin_percent": 15,
+    "max_rpm": 1490,
+    "rpm_at": [[30,520],[40,690],[50,860],[60,1010],[70,1160],[80,1300],[90,1410],[100,1490]],
+    "chosen_pwm_base_hz": 26000,
+    "chosen_edges": 3,
+    "chosen_range": 1,
+    "assumed_ppr": 2,
+    "suggested_ppr": 2,
+    "confidence": 2,
+    "note": "ok: 520..1490 RPM, starts at 15%"
+  }
+}
+```
+
+`state` is one of `idle`, `pending`, `running`, `done`, `aborted`, `error`;
+`abort_reason` one of `user`, `temperature`, `timeout`, `i2c`, `no_tach`, `settings`.
+`confidence` is 0 (low), 1 (medium) or 2 (high).
 
 ## GET `/api/settings`
 Gets the currently configured device settings.
@@ -245,7 +330,15 @@ Response:
       {"temperature": 60.0, "fan_percent": 70},
       {"temperature": 80.0, "fan_percent": 90},
       {"temperature": 100.0, "fan_percent": 100}
-    ]
+    ],
+    "fan_pwm_base_hz": 26000,
+    "fan_pwm_divide": 1,
+    "fan_tach_pulses_per_rev": 2,
+    "fan_tach_edges": 0,
+    "fan_tach_range": 1,
+    "fan_min_drive_percent": 0,
+    "fan_cal_min_spin_percent": 15,
+    "fan_cal_max_rpm": 1490
   },
   "console": {
     "uart_enabled": true,
