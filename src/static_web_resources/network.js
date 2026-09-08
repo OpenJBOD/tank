@@ -34,7 +34,7 @@ async function fetchNetworkSettings()
             // Populate IPv6 settings
             const ipv6ModeSelect = document.getElementById("ipv6_mode");
             if (ipv6ModeSelect) {
-                ipv6ModeSelect.value = json.network.ipv6_mode || "slaac";
+                ipv6ModeSelect.value = json.network.ipv6_mode || "disabled";
             }
             document.getElementById("ipv6_address").value = json.network.ipv6_addr || "";
             document.getElementById("ipv6_prefix_length").value = typeof json.network.ipv6_prefix_length === "number"
@@ -54,7 +54,7 @@ async function fetchNetworkSettings()
             // Set default values if no network settings found
             document.getElementById("hostname").value = "openjbod";
             document.getElementById("ip_dhcp").checked = true;
-            document.getElementById("ipv6_mode").value = "slaac";
+            document.getElementById("ipv6_mode").value = "disabled";
             
             // Update field states for default case
             if (window.updateFieldStates) {
@@ -70,7 +70,7 @@ async function fetchNetworkSettings()
         // Set default values on error
         document.getElementById("hostname").value = "openjbod";
         document.getElementById("ip_dhcp").checked = true;
-        document.getElementById("ipv6_mode").value = "slaac";
+        document.getElementById("ipv6_mode").value = "disabled";
         
         // Update field states for error case
         if (window.updateFieldStates) {
@@ -94,7 +94,7 @@ async function saveNetworkSettings(formData)
                 ip_mask: formData.subnet_mask || "",
                 gw_addr: formData.gateway || "",
                 dns1: formData.dns || "",
-                ipv6_mode: formData.ipv6_mode || "slaac",
+                ipv6_mode: formData.ipv6_mode || "disabled",
                 ipv6_addr: formData.ipv6_address || "",
                 ipv6_prefix_length: formData.ipv6_prefix_length ?? 64,
                 ipv6_gateway: formData.ipv6_gateway || "",
