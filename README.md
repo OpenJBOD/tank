@@ -46,20 +46,39 @@ west init -m https://github.com/openjbod/tank --mr main tank-workspace
 cd tank-workspace
 west update
 west packages pip --install
+pip install imgtool # imgtool is required for signing the firmware image later.
 west sdk install -t arm-zephyr-eabi
 ```
 
 ### 3. Build Tank
 
 ```bash
-west build -s tank -b rpi_pico
+# Build the bootloader and firmware
+west build -s tank -b rpi_pico/rp2040/mcuboot --sysbuild
+
+# Sign the firmware
+python zephyr/scripts/build/uf2conv.py build/tank/zephyr/zephyr.signed.hex \
+  -f RP2040 -c -o build/app.uf2
+
+# Combine bootloader and firmware into final flashable file
+cat build/mcuboot/zephyr/zephyr.uf2 build/app.uf2 > build/tank-full.uf2
 ```
 
-The resulting firmware image is produced in `build/zephyr/zephyr.uf2`. Drag-and-drop the UF2 onto a mounted RP2040 boot volume, flash it using `picotool`, or use any other preferred workflow.
+The resulting firmware image is produced in `build/tank-full.uf2`. Drag-and-drop the UF2 onto a mounted RP2040 boot volume, flash it using `picotool`, or use any other preferred workflow.
+
+#### 3a. Custom Signing Keys
+
+The above approach uses the default signing key included in MCUboot.
+
+If you wish to roll your own updates to Tank, you may benefit from setting your own signing key. This can be done by invoking the build process with: 
+```bash
+west build -s tank -b rpi_pico/rp2040/mcuboot --sysbuild -- -DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE=\"/path/to/key.pem\"
+```
+You can also refer to our [CI Build](https://github.com/OpenJBOD/tank/blob/main/.github/workflows/build.yml) which shows how we do this in GitHub Actions.
 
 ### 4. (Optional) Clean and Rebuild
 
 ```bash
 west build -t pristine
-west build -s tank -b rpi_pico
+west build -s tank -b rpi_pico/rp2040/mcuboot --sysbuild
 ```
