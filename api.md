@@ -109,6 +109,9 @@ Response:
 ```
 
 `beacon` reflects whether the locator beacon (see `POST /api/led`) is currently active.
+In `fan`, `speed_percent` is the current PWM duty and `fault` has the meaning given
+under `/api/fan`. When `valid` is false, `rpm` and `speed_percent` read 0 and
+`fault` reads false.
 
 ## POST `/api/led`
 Controls the **locator beacon**. The onboard status LED (`led0`) is otherwise
@@ -123,17 +126,20 @@ Body:
 ```
 
 ## GET `/api/power`
-This fetches the current power state.
+This fetches the current power state (`"on"` or `"off"`), read from the latch output.
 
 Response:
 ```json
 {
-  "powered_on": true
+  "status": "power_status",
+  "state": "on"
 }
 ```
 
 ## GET `/api/power/on`
-Switches the ATX power supply on. Can be used regardless of state.
+Switches the ATX power supply on. Can be used regardless of state. `POST` is accepted
+as well. `success` means the set pulse was sent; the resulting state is not read back,
+use `GET /api/power` to confirm.
 
 Response:
 ```json
@@ -144,7 +150,9 @@ Response:
 ```
 
 ## GET `/api/power/off`
-Switches the ATX power supply on. Can be used regardless of state.
+Switches the ATX power supply off. Can be used regardless of state. `POST` is accepted
+as well. `success` means the reset pulse was sent; the resulting state is not read back,
+use `GET /api/power` to confirm.
 
 Response:
 ```json
@@ -203,9 +211,11 @@ Response:
   `min_rpm`. Sampling 3 edges lowers the floor (240 RPM for a 2-pulse fan) so quiet
   fans idling at 300 RPM still read; the characterization selects that automatically
   for fans below 2000 RPM at 30 % duty.
-- `stall`, `spin_fail`, `drive_fail` and `watchdog` mirror the controller's status
+- `spin_fail`, `drive_fail` and `watchdog` mirror the controller's status
   register (read-to-clear, so each flag is reported once per occurrence).
-  `fault` is `stall || drive_fail`. A stall flag with no fan connected is normal.
+  `stall` is computed, not latched: the fan is being driven (duty above 0) but no
+  valid tach signal is seen. `fault` is `stall || drive_fail`. A stall flag with no fan
+  connected is normal.
 - `control.mode` is `auto`, `external` or `calibrating`.
 
 ## POST `/api/fan/set`
@@ -308,9 +318,9 @@ Response:
   "power": {
     "ignore_power_switch": false,
     "on_boot": true,
-    "on_boot_delay": 5000,
+    "on_boot_delay": 5,
     "follow_usb": true,
-    "follow_usb_delay": 2000
+    "follow_usb_delay": 2
   },
   "http": {
     "enable_http": true,
@@ -350,6 +360,13 @@ Response:
 `environment.primary_temp_source`: preferred temperature probe — `0` = onboard
 DS18B20 (GPIO18), `1` = external/header DS18B20 (GPIO11). Fan control and the
 reported `active_source` fall back automatically if the selected probe is invalid.
+
+`power.on_boot_delay` and `power.follow_usb_delay` are in seconds. `on_boot` runs once
+per MCU start, after `on_boot_delay`, and only ever turns the supply on. `follow_usb`
+acts only on USB-sense edges (not on the level at boot): a rise switches on and a fall
+switches off after `follow_usb_delay`, unless the level changes again first. The USB
+edge handler is installed at boot only when `follow_usb` is enabled. The two options are
+independent; nothing prevents enabling both.
 
 `console.uart_enabled` / `console.usb_enabled`: enable the hardware UART and/or
 USB CDC-ACM shell/console. Both default `true`. Changes take effect on the next
