@@ -47,7 +47,7 @@ Response:
   "version": "0.9.9 (abc1234)",
   "firmware_version": "0.9.9",
   "bootloader_version": 1,
-  "board_revision": "Rev4",
+  "board_revision": "Rev 5",
   "ip_address": "192.168.1.100",
   "subnet_mask": "255.255.255.0",
   "gateway": "192.168.1.1",
@@ -87,7 +87,7 @@ Response:
   "device": {
     "serial": "ABCD1234ABCD1234",
     "version": "0.0.1",
-    "board_revision": "1.0",
+    "board_revision": "Rev 5",
     "hostname": "tank-device"
   },
   "network": {

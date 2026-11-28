@@ -1,0 +1,5 @@
+extends:
+  - recommended
+rules:
+  # UI pages and logout have no error replies in the firmware.
+  operation-4xx-response: off
