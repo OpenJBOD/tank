@@ -1,0 +1,1110 @@
+openapi: 3.1.0
+info:
+  title: OpenJBOD Tank HTTP API
+  version: 1.0.0
+  summary: HTTP API served by the Tank firmware.
+  description: |
+    Derived from the firmware source under `src/http/routes/` and the route
+    registrations in `src/http/router.c`. Every route is registered on both the
+    HTTP and HTTPS services (HTTPS only when enabled in settings).
+
+    All `/api/*` routes except `/api/login` and `/api/logout` require either a
+    session cookie (from `/api/login`) or a bearer API token (from `/api/tokens`).
+    Unauthenticated API calls get `401 {"error":"unauthorized"}`. HTTP Basic auth is
+    not supported.
+
+    The device also serves HTML pages for its web UI (`/`, `/login`, `/network`
+    and others). They are out of scope for this document.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+servers:
+  - url: /
+    description: The device itself (HTTP on port 80 by default, HTTPS when enabled).
+tags:
+  - name: auth
+    description: Login, logout and API tokens.
+  - name: device
+    description: Identity, status and locator beacon.
+  - name: power
+    description: ATX power control.
+  - name: environment
+    description: Temperature and fan.
+  - name: settings
+    description: Configuration, backup, restore and certificates.
+  - name: users
+    description: Local user accounts.
+  - name: maintenance
+    description: Firmware update and resets.
+security:
+  - bearerAuth: []
+  - cookieAuth: []
+paths:
+  /api/login:
+    post:
+      tags: [auth]
+      operationId: login
+      summary: Log in and receive a session cookie
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: {type: string}
+                password: {type: string}
+      responses:
+        "200":
+          description: Logged in. The session cookie lasts 24 hours and refreshes on use.
+          headers:
+            Set-Cookie:
+              description: "`session=<id>; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400`"
+              schema: {type: string}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Success"}
+        "400": {$ref: "#/components/responses/LoginError"}
+        "401": {$ref: "#/components/responses/LoginError"}
+        "409": {$ref: "#/components/responses/LoginError"}
+        "413": {$ref: "#/components/responses/LoginError"}
+        "500": {$ref: "#/components/responses/LoginError"}
+  /api/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      summary: Destroy the current session
+      description: Needs no authentication. Always answers 200 and clears the cookie.
+      security: []
+      responses:
+        "200":
+          description: Session cleared.
+          headers:
+            Set-Cookie:
+              description: "`session=; Path=/; HttpOnly; Max-Age=0`"
+              schema: {type: string}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Success"}
+  /api/tokens:
+    get:
+      tags: [auth]
+      operationId: listTokens
+      summary: List API tokens (id and label only)
+      responses:
+        "200":
+          description: Token metadata. Secrets are never returned.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/TokenInfo"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      tags: [auth]
+      operationId: createToken
+      summary: Create an API token
+      description: |
+        The full token (`<id>.<secret>`) is returned once. At most 8 tokens exist.
+        A missing or unparsable body creates a token labelled `token`.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                label:
+                  type: string
+                  maxLength: 31
+                  description: Characters outside `A-Za-z0-9 _.-` are stripped.
+      responses:
+        "200":
+          description: Token created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, id, token]
+                properties:
+                  success: {type: boolean, const: true}
+                  id: {type: string}
+                  token:
+                    type: string
+                    description: "Send as `Authorization: Bearer <token>`."
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409":
+          description: Token limit reached, or another token request is in progress.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SuccessFalseMessage"}
+        "500":
+          description: Token creation failed.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SuccessFalseMessage"}
+    delete:
+      tags: [auth]
+      operationId: deleteToken
+      summary: Revoke an API token
+      description: |
+        Use the `id` query parameter. The server does not deliver DELETE bodies, so
+        the JSON body form is not reliable.
+      parameters:
+        - name: id
+          in: query
+          schema: {type: string}
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id: {type: string}
+      responses:
+        "200":
+          description: Revoked (also returned when the id does not exist).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Success"}
+        "400":
+          description: No id supplied.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SuccessFalseMessage"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409":
+          description: Another token request is in progress.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SuccessFalseMessage"}
+  /api/device_info:
+    get:
+      tags: [device]
+      operationId: getDeviceInfo
+      summary: Device identity and IPv4 network info
+      responses:
+        "200":
+          description: Device information.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DeviceInfo"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /api/status:
+    get:
+      tags: [device]
+      operationId: getStatus
+      summary: Combined status snapshot
+      responses:
+        "200":
+          description: Status snapshot.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Status"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /api/led:
+    post:
+      tags: [device]
+      operationId: setBeacon
+      summary: Turn the locator beacon on or off
+      description: |
+        The beacon is not persisted. The handler answers 200 with an empty body, also
+        when the body is not valid; an invalid body changes nothing. A body longer than
+        32 bytes ends the request without a normal HTTP reply.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [beacon]
+              properties:
+                beacon: {type: boolean}
+      responses:
+        "200":
+          description: Request accepted. Empty body.
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /api/power:
+    get:
+      tags: [power]
+      operationId: getPower
+      summary: ATX power state
+      responses:
+        "200":
+          description: Current state.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, state]
+                properties:
+                  status: {type: string, const: power_status}
+                  state: {type: string, enum: [on, off]}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /api/power/on:
+    get:
+      tags: [power]
+      operationId: powerOnGet
+      summary: Switch ATX power on
+      description: Changes state despite being a GET. `POST` does the same.
+      responses:
+        "200": {$ref: "#/components/responses/PowerOn"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      tags: [power]
+      operationId: powerOn
+      summary: Switch ATX power on
+      description: "`success` means the pulse was sent; state is not read back. Use `GET /api/power` to confirm."
+      responses:
+        "200": {$ref: "#/components/responses/PowerOn"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /api/power/off:
+    get:
+      tags: [power]
+      operationId: powerOffGet
+      summary: Switch ATX power off
+      description: Changes state despite being a GET. `POST` does the same.
+      responses:
+        "200": {$ref: "#/components/responses/PowerOff"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    post:
+      tags: [power]
+      operationId: powerOff
+      summary: Switch ATX power off
+      description: "`success` means the pulse was sent; state is not read back. Use `GET /api/power` to confirm."
+      responses:
+        "200": {$ref: "#/components/responses/PowerOff"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /api/temp:
+    get:
+      tags: [environment]
+      operationId: getTemperature
+      summary: Temperature sensor readings
+      responses:
+        "200":
+          description: Cached readings in degrees Celsius.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Temperature"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "500":
+          description: Sensors could not be read.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/StatusError"}
+  /api/fan:
+    get:
+      tags: [environment]
+      operationId: getFan
+      summary: Fan controller state
+      responses:
+        "200":
+          description: Fan controller readings and configuration.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Fan"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "500":
+          description: Controller could not be read.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/StatusError"}
+  /api/fan/set:
+    post:
+      tags: [environment]
+      operationId: setFan
+      summary: Set the fan drive directly
+      description: |
+        The body is form-encoded, not JSON. `duty` takes precedence over `percent` when
+        both are present. Values are clamped (duty 0-255, percent 0-100). Automatic
+        control overrides the value within one update interval unless
+        `use_external_fan_control` is set. A body of 64 bytes or more ends the request
+        without a normal HTTP reply.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                duty: {type: integer, minimum: 0, maximum: 255}
+                percent: {type: integer, minimum: 0, maximum: 100}
+      responses:
+        "200":
+          description: Fan drive set.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, pwm, note]
+                properties:
+                  status: {type: string, const: fan_set_success}
+                  pwm:
+                    type: object
+                    required: [duty, percent]
+                    properties:
+                      duty: {type: integer}
+                      percent: {type: integer}
+                  note: {type: string}
+        "400":
+          description: Neither `duty` nor `percent` was given.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/StatusError"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "500":
+          description: The controller rejected the write.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/StatusError"}
+  /api/fan/calibrate:
+    get:
+      tags: [environment]
+      operationId: getFanCalibration
+      summary: Fan calibration status and result
+      responses:
+        "200":
+          description: Calibration state and, once finished, its result.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/FanCalibration"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "500":
+          description: Response too large.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/StatusError"}
+    post:
+      tags: [environment]
+      operationId: fanCalibrateAction
+      summary: Start or abort calibration, or reset fan hardware settings
+      description: |
+        The body is form-encoded. `action=abort` aborts a running calibration,
+        `action=reset` restores the fan hardware defaults, and anything else
+        (including an empty body) starts a calibration. A body of 64 bytes or more ends
+        the request without a normal HTTP reply.
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                action: {type: string, enum: [start, abort, reset]}
+      responses:
+        "200":
+          description: Abort requested, or hardware settings reset.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: {type: string, enum: [calibration_abort_requested, fan_hw_reset]}
+        "202":
+          description: Calibration started.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: {type: string, const: calibration_started}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409":
+          description: Nothing to abort, calibration already running, or temperature too high.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [calibration_not_running, calibration_running, temperature_too_high]
+        "500":
+          description: Reset or start failed.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/StatusError"}
+        "503":
+          description: Fan controller not initialized.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: {type: string, const: fan_controller_not_initialized}
+  /api/settings:
+    get:
+      tags: [settings]
+      operationId: getSettings
+      summary: Read all settings
+      responses:
+        "200":
+          description: Current settings.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Settings"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "500":
+          description: Response too large.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/StatusMessage"}
+    post:
+      tags: [settings]
+      operationId: updateSettings
+      summary: Update settings
+      description: |
+        Send any of the top-level groups. A group that is present is applied; fields
+        missing from a present group keep their current value, except `fan_curve`
+        when sent, which should carry all five points. Unknown keys are ignored.
+        Changing `http` restarts the web server. Changing `console` takes effect
+        after a reboot. The `fan_cal_*` fields are read-only. A body over 1023 bytes
+        ends the request without a normal HTTP reply.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/SettingsUpdate"}
+      responses:
+        "200":
+          description: Saved.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, result]
+                properties:
+                  status: {type: string, const: settings_updated}
+                  result: {type: string, const: success}
+        "400":
+          description: Body is not valid JSON.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/StatusError"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "500":
+          description: Saving failed.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/StatusError"}
+  /api/settings/backup:
+    get:
+      tags: [settings]
+      operationId: backupSettings
+      summary: Download the raw settings file
+      responses:
+        "200":
+          description: Settings file.
+          headers:
+            Content-Disposition:
+              description: '`attachment; filename="settings.dat"`'
+              schema: {type: string}
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "500":
+          description: Settings file missing, too large, or unreadable.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/StatusMessage"}
+  /api/settings/restore:
+    post:
+      tags: [settings]
+      operationId: restoreSettings
+      summary: Replace the settings file and reboot
+      description: Raw body, at most 65536 bytes. The device reboots to apply it.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: {type: string, format: binary}
+      responses:
+        "200":
+          description: Restored; the device is rebooting.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, bytes, message]
+                properties:
+                  status: {type: string, const: restored}
+                  bytes: {type: integer}
+                  message: {type: string}
+        "400":
+          description: Empty upload, upload too large, or write failed.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/StatusMessage"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409":
+          description: Another restore is in progress.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/StatusMessage"}
+        "500":
+          description: Could not open or apply the restore file.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/StatusMessage"}
+  /api/users:
+    get:
+      tags: [users]
+      operationId: listUsers
+      summary: List usernames
+      description: Object keyed by slot number (1 to 5); empty slots are omitted.
+      responses:
+        "200":
+          description: Users by slot.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  type: object
+                  required: [username]
+                  properties:
+                    username: {type: string}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "500":
+          description: Settings unavailable or response too large. Empty body.
+    post:
+      tags: [users]
+      operationId: manageUser
+      summary: Create, update or delete a user
+      description: |
+        `create` and `update` need `password` (8-64 characters); `create` also limits
+        `username` to 1-31 characters. `update` changes the password of an existing
+        user. `delete` needs only `username`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, username]
+              properties:
+                action: {type: string, enum: [create, update, delete]}
+                username: {type: string}
+                password: {type: string, minLength: 8, maxLength: 64}
+      responses:
+        "200":
+          description: Done.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, message]
+                properties:
+                  status: {type: string, const: success}
+                  message: {type: string}
+        "400":
+          description: Missing field, bad length, or unknown action.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/StatusMessage"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404":
+          description: "`delete` of a user that does not exist."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/StatusMessage"}
+        "413":
+          description: Body too large. Empty body.
+        "500":
+          description: |
+            The change could not be saved. Also returned when `create` names a username
+            that already exists, when the user table is full, and when `update` names a
+            user that does not exist.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/StatusMessage"}
+  /api/certificates/upload:
+    post:
+      tags: [settings]
+      operationId: uploadCertificates
+      summary: Upload a custom TLS certificate and key
+      description: |
+        Total upload at most 8191 bytes. The certificate is stored as hex and must fit
+        in 4096 hex characters, the key in 2048. Enable `http.use_custom_certificates`
+        and restart the server to use them.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [certificate, private_key]
+              properties:
+                certificate: {type: string, format: binary}
+                private_key: {type: string, format: binary}
+      responses:
+        "200":
+          description: Stored.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SuccessMessage"}
+        "400":
+          description: Malformed multipart body, or certificate and key not found in it.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SuccessFalseMessage"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409":
+          description: Another upload is in progress.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SuccessFalseMessage"}
+        "413":
+          description: Upload too large.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SuccessFalseMessage"}
+        "500":
+          description: Storing failed.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SuccessFalseMessage"}
+  /api/firmware:
+    post:
+      tags: [maintenance]
+      operationId: uploadFirmware
+      summary: Upload a signed firmware image and reboot into it
+      description: |
+        Registered only in builds with MCUboot. The body is the raw signed image
+        (`zephyr.signed.bin`), not multipart. The device reboots to apply it.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: {type: string, format: binary}
+      responses:
+        "200":
+          description: Image staged; the device is rebooting.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, bytes, message]
+                properties:
+                  success: {type: boolean, const: true}
+                  bytes: {type: integer}
+                  message: {type: string}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "409":
+          description: Another upload is in progress.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SuccessFalseMessage"}
+        "500":
+          description: Flash init or write failed, or the image could not be marked pending.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SuccessFalseMessage"}
+  /api/reset/device:
+    post:
+      tags: [maintenance]
+      operationId: resetDevice
+      summary: Reboot the device
+      description: The reboot happens about 500 ms after the response.
+      responses:
+        "200":
+          description: Accepted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, result]
+                properties:
+                  status: {type: string, const: reset_device}
+                  result: {type: string, const: accepted}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+  /api/reset/config:
+    post:
+      tags: [maintenance]
+      operationId: resetConfig
+      summary: Reset all configuration to defaults
+      description: Accepting the request schedules a reboot.
+      responses:
+        "200":
+          description: Accepted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, result]
+                properties:
+                  status: {type: string, const: reset_config}
+                  result: {type: string, const: accepted}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "500":
+          description: Reset failed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, result, code]
+                properties:
+                  status: {type: string, const: reset_config}
+                  result: {type: string, const: error}
+                  code: {type: integer, description: Negative errno from the firmware.}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: API token from `POST /api/tokens`, in the form `<id>.<secret>`.
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: session
+      description: Session cookie set by `POST /api/login`.
+  responses:
+    Unauthorized:
+      description: Missing or invalid credentials. No `WWW-Authenticate` header is sent.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error: {type: string, const: unauthorized}
+    LoginError:
+      description: Login failed. `message` is one of `invalid request`, `invalid credentials`, `busy`, `payload too large`, `session error`.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/SuccessFalseMessage"}
+    PowerOn:
+      description: Power-on pulse sent.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [status, result]
+            properties:
+              status: {type: string, const: power_on}
+              result: {type: string, const: success}
+    PowerOff:
+      description: Power-off pulse sent.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [status, result]
+            properties:
+              status: {type: string, const: power_off}
+              result: {type: string, const: success}
+  schemas:
+    Success:
+      type: object
+      required: [success]
+      properties:
+        success: {type: boolean, const: true}
+    SuccessMessage:
+      type: object
+      required: [success, message]
+      properties:
+        success: {type: boolean, const: true}
+        message: {type: string}
+    SuccessFalseMessage:
+      type: object
+      required: [success, message]
+      properties:
+        success: {type: boolean, const: false}
+        message: {type: string}
+    StatusMessage:
+      type: object
+      required: [status, message]
+      properties:
+        status: {type: string, const: error}
+        message: {type: string}
+    StatusError:
+      type: object
+      description: Error body; `status` names the operation, for example `temp_error`.
+      required: [status]
+      properties:
+        status: {type: string}
+        error: {type: string}
+    TokenInfo:
+      type: object
+      required: [id, label]
+      properties:
+        id: {type: string, description: 8 hex characters.}
+        label: {type: string}
+    BoardRevision:
+      type: string
+      description: |
+        `Rev 4`, `Rev 5` or `Unknown Board Version`; `Unknown` when the revision
+        could not be read.
+    DeviceInfo:
+      type: object
+      required: [serial, version, firmware_version, bootloader_version, board_revision, ip_address, subnet_mask, gateway, mac_address]
+      properties:
+        serial: {type: string}
+        version: {type: string, description: Build info string.}
+        firmware_version: {type: string}
+        bootloader_version: {type: integer}
+        board_revision: {$ref: "#/components/schemas/BoardRevision"}
+        ip_address: {type: string, description: "IPv4 address, or `Unknown`."}
+        subnet_mask: {type: string, description: "IPv4 netmask, or `Unknown`."}
+        gateway: {type: string, description: "IPv4 gateway, or `Unknown`."}
+        mac_address: {type: string, description: "`AA:BB:CC:DD:EE:FF`, or `Unknown`."}
+    Probe:
+      type: object
+      required: [temperature, valid]
+      properties:
+        temperature: {type: number, description: Degrees Celsius.}
+        valid: {type: boolean}
+    ExtProbe:
+      allOf:
+        - $ref: "#/components/schemas/Probe"
+        - type: object
+          required: [present]
+          properties:
+            present: {type: boolean, description: Header probe detected.}
+    ActiveSource:
+      type: string
+      enum: [onboard, header, rp2040, none]
+    Status:
+      type: object
+      required: [status, uptime, temperature, fan, device, network, power, beacon]
+      properties:
+        status: {type: string, const: success}
+        uptime: {type: integer, description: Milliseconds since boot.}
+        temperature:
+          type: object
+          required: [valid, active_source, ds18b20, ds18b20_ext, rp2040]
+          properties:
+            valid: {type: boolean}
+            active_source: {$ref: "#/components/schemas/ActiveSource"}
+            ds18b20: {$ref: "#/components/schemas/Probe"}
+            ds18b20_ext: {$ref: "#/components/schemas/ExtProbe"}
+            rp2040: {$ref: "#/components/schemas/Probe"}
+        fan:
+          type: object
+          required: [valid, rpm, speed_percent, fault]
+          properties:
+            valid: {type: boolean}
+            rpm: {type: integer}
+            speed_percent: {type: integer}
+            fault: {type: boolean}
+        device:
+          type: object
+          required: [serial, version, board_revision, hostname]
+          properties:
+            serial: {type: string}
+            version: {type: string}
+            board_revision: {$ref: "#/components/schemas/BoardRevision"}
+            hostname: {type: string}
+        network:
+          type: object
+          required: [mac_address, ip_address, subnet_mask, gateway, ip_method, ipv6_mode, ipv6_addresses]
+          properties:
+            mac_address: {type: string}
+            ip_address: {type: string}
+            subnet_mask: {type: string}
+            gateway: {type: string}
+            ip_method: {type: string, enum: [DHCP, Static]}
+            ipv6_mode: {type: string, enum: [Disabled, SLAAC, DHCPv6, Static, Unknown]}
+            ipv6_addresses:
+              type: array
+              items: {type: string, description: "Address with prefix length, e.g. `fe80::1/64`."}
+        power:
+          type: object
+          required: [state, on_boot, on_boot_delay, follow_usb, follow_usb_delay]
+          properties:
+            state: {type: string, enum: [on, off]}
+            on_boot: {type: boolean}
+            on_boot_delay: {type: integer}
+            follow_usb: {type: boolean}
+            follow_usb_delay: {type: integer}
+        beacon: {type: boolean}
+    Temperature:
+      type: object
+      required: [status, primary_source, active_source, active_temperature, ds18b20, ds18b20_ext, rp2040]
+      properties:
+        status: {type: string, const: temp_reading}
+        primary_source: {type: integer, description: "Configured preference: 0 onboard, 1 header."}
+        active_source: {$ref: "#/components/schemas/ActiveSource"}
+        active_temperature: {type: number}
+        ds18b20:
+          allOf:
+            - $ref: "#/components/schemas/Probe"
+            - {type: object, required: [unit], properties: {unit: {type: string, const: celsius}}}
+        ds18b20_ext:
+          allOf:
+            - $ref: "#/components/schemas/ExtProbe"
+            - {type: object, required: [unit], properties: {unit: {type: string, const: celsius}}}
+        rp2040:
+          allOf:
+            - $ref: "#/components/schemas/Probe"
+            - {type: object, required: [unit], properties: {unit: {type: string, const: celsius}}}
+    Fan:
+      type: object
+      required: [status, pwm, fan, tach, control, initialized]
+      properties:
+        status: {type: string, const: fan_reading}
+        pwm:
+          type: object
+          required: [duty, percent, base_hz, divide, effective_hz]
+          properties:
+            duty: {type: integer}
+            percent: {type: integer}
+            base_hz: {type: integer}
+            divide: {type: integer}
+            effective_hz: {type: integer}
+        fan:
+          type: object
+          required: [rpm, tach_count, tach_valid, fault, stall, spin_fail, drive_fail, watchdog, status_reg]
+          properties:
+            rpm: {type: integer}
+            tach_count: {type: integer}
+            tach_valid: {type: boolean}
+            fault: {type: boolean}
+            stall: {type: boolean}
+            spin_fail: {type: boolean}
+            drive_fail: {type: boolean}
+            watchdog: {type: boolean}
+            status_reg: {type: integer}
+        tach:
+          type: object
+          required: [pulses_per_rev, edges, edges_auto, range, min_rpm]
+          properties:
+            pulses_per_rev: {type: integer}
+            edges: {type: integer}
+            edges_auto: {type: boolean}
+            range: {type: integer}
+            min_rpm: {type: integer}
+        control:
+          type: object
+          required: [mode, target_percent, min_drive_percent]
+          properties:
+            mode: {type: string, enum: [auto, external, calibrating]}
+            target_percent: {type: integer}
+            min_drive_percent: {type: integer}
+        initialized: {type: boolean}
+    FanCalibration:
+      type: object
+      required: [state, phase, progress_percent, elapsed_ms, abort_reason, result]
+      properties:
+        state: {type: string, enum: [idle, pending, running, done, aborted, error]}
+        phase: {type: string, enum: [none, tach_check, sweep_up, start_scan, freq_retry, finalize]}
+        progress_percent: {type: integer}
+        elapsed_ms: {type: integer}
+        abort_reason: {type: [string, "null"]}
+        result:
+          type: object
+          required: [tach_present, monotonic, atx_power_on, budget_cutoff, used_retry, min_spin_percent, max_rpm, rpm_at, chosen_pwm_base_hz, chosen_edges, chosen_range, assumed_ppr, suggested_ppr, confidence, note]
+          properties:
+            tach_present: {type: boolean}
+            monotonic: {type: boolean}
+            atx_power_on: {type: boolean}
+            budget_cutoff: {type: boolean}
+            used_retry: {type: boolean}
+            min_spin_percent: {type: integer}
+            max_rpm: {type: integer}
+            rpm_at:
+              type: array
+              description: Sweep points as `[percent, rpm]` pairs.
+              items:
+                type: array
+                prefixItems:
+                  - {type: integer}
+                  - {type: integer}
+                minItems: 2
+                maxItems: 2
+            chosen_pwm_base_hz: {type: integer}
+            chosen_edges: {type: integer}
+            chosen_range: {type: integer}
+            assumed_ppr: {type: integer}
+            suggested_ppr: {type: integer}
+            confidence: {type: integer}
+            note: {type: string}
+    FanCurvePoint:
+      type: object
+      required: [temperature, fan_percent]
+      properties:
+        temperature: {type: number, description: Degrees Celsius.}
+        fan_percent: {type: integer}
+    NetworkSettings:
+      type: object
+      properties:
+        ip_method: {type: string, enum: [dhcp, static]}
+        ip_addr: {type: string}
+        gw_addr: {type: string}
+        ip_mask: {type: string}
+        dns1: {type: string}
+        hostname: {type: string}
+        ipv6_mode: {type: string, enum: [disabled, slaac, dhcpv6, static]}
+        ipv6_addr: {type: string}
+        ipv6_prefix_length: {type: integer}
+        ipv6_gateway: {type: string}
+        ipv6_dns1: {type: string}
+    PowerSettings:
+      type: object
+      properties:
+        ignore_power_switch: {type: boolean}
+        on_boot: {type: boolean}
+        on_boot_delay: {type: integer}
+        follow_usb: {type: boolean}
+        follow_usb_delay: {type: integer}
+    HttpSettings:
+      type: object
+      properties:
+        enable_http: {type: boolean}
+        enable_https: {type: boolean}
+        http_port: {type: integer}
+        https_port: {type: integer}
+        use_custom_certificates: {type: boolean}
+    EnvironmentSettings:
+      type: object
+      properties:
+        use_external_fan_control: {type: boolean}
+        fan_update_interval_ms: {type: integer}
+        fan_hysteresis_percent: {type: integer}
+        primary_temp_source: {type: integer, description: "0 onboard probe, 1 header probe."}
+        fan_curve:
+          type: array
+          minItems: 5
+          maxItems: 5
+          items: {$ref: "#/components/schemas/FanCurvePoint"}
+        fan_pwm_base_hz: {type: integer}
+        fan_pwm_divide: {type: integer}
+        fan_tach_pulses_per_rev: {type: integer}
+        fan_tach_edges: {type: integer}
+        fan_tach_range: {type: integer}
+        fan_min_drive_percent: {type: integer}
+    ConsoleSettings:
+      type: object
+      properties:
+        uart_enabled: {type: boolean}
+        usb_enabled: {type: boolean}
+    SettingsUpdate:
+      type: object
+      properties:
+        network: {$ref: "#/components/schemas/NetworkSettings"}
+        power: {$ref: "#/components/schemas/PowerSettings"}
+        http: {$ref: "#/components/schemas/HttpSettings"}
+        environment: {$ref: "#/components/schemas/EnvironmentSettings"}
+        console: {$ref: "#/components/schemas/ConsoleSettings"}
+    Settings:
+      type: object
+      required: [network, power, http, environment, console]
+      properties:
+        network: {$ref: "#/components/schemas/NetworkSettings"}
+        power: {$ref: "#/components/schemas/PowerSettings"}
+        http: {$ref: "#/components/schemas/HttpSettings"}
+        environment:
+          allOf:
+            - $ref: "#/components/schemas/EnvironmentSettings"
+            - type: object
+              description: The read-only calibration results are included on read.
+              properties:
+                fan_cal_min_spin_percent: {type: integer}
+                fan_cal_max_rpm: {type: integer}
+        console: {$ref: "#/components/schemas/ConsoleSettings"}
